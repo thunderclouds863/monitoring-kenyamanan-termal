@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: monitoring-termal-demo
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
