@@ -267,7 +267,7 @@ class ConditionChecker {
         $userId = $this->user['id'];
         $stmt = $this->conn->prepare("SELECT * FROM last_alerts WHERE user_id = ? AND sensor_type = ?");
         $stmt->execute([$userId, $sensor]);
-        $last = $stmt->fetch(PDO::FETCH_ASSOC);
+        $last = $stmt->get_result()->fetch_assoc();
 
         $now = time();
         $cooldown = (int)$this->settings['cooldown_time'];
