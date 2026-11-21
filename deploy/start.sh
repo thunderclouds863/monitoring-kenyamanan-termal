@@ -28,4 +28,8 @@ if [ -n "${DOC_ROOT:-}" ]; then
   sed -i "s#DocumentRoot /var/www/html#DocumentRoot \"/var/www/html/$DOC_ROOT\"#" /etc/apache2/sites-available/000-default.conf
   printf "<Directory \"/var/www/html/%s\">\n  AllowOverride All\n  Require all granted\n</Directory>\n" "$DOC_ROOT" >> /etc/apache2/apache2.conf
 fi
+# Beberapa app menaruh kode PHP di file .html (di server aslinya .html diproses sebagai PHP)
+if [ "${PARSE_HTML_AS_PHP:-0}" = "1" ]; then
+  printf '<FilesMatch "\\.html$">\n  SetHandler application/x-httpd-php\n</FilesMatch>\n' > /etc/apache2/conf-enabled/zz-html-php.conf
+fi
 exec apache2-foreground
