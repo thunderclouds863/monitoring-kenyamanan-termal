@@ -1,1116 +1,936 @@
 <?php
-session_start();
 include 'db.php';
-if (!isset($_SESSION['user_id']) && isset($_COOKIE['remember_token'])) {
-    $token = $_COOKIE['remember_token'];
-    $stmt = $conn->prepare("SELECT id, username FROM users WHERE remember_token = ?");
-    $stmt->bind_param("s", $token);
-    $stmt->execute();
-    $result = $stmt->get_result();
+require_once 'includes/auth_bootstrap.php';
 
-    if ($user = $result->fetch_assoc()) {
-        $_SESSION['user_id'] = $user['id'];
-        $_SESSION['username'] = $user['username'];
-    }
-}
+$user = require_authenticated_user($conn);
+$user_id = (int)$user['id'];
+$settings = get_user_settings($conn, $user_id);
 
-// Jika masih belum login, redirect
-if (!isset($_SESSION['user_id']) && !isset($_COOKIE['remember_token'])) {
-    header("Location: login.php");
-    exit();
-}
-
-use PHPMailer\PHPMailer\PHPMailer;
-use PHPMailer\PHPMailer\Exception;
-require 'vendor/autoload.php';
-require 'vendor/PHPMailer-master/src/PHPMailer.php';
-require 'vendor/PHPMailer-master/src/SMTP.php';
-require 'vendor/PHPMailer-master/src/Exception.php';
-
-$bodyClass = 'default-class'; 
+$interval_update = (int)$settings['interval_update'];
+$suhu_min = (float)$settings['suhu_min'];
+$suhu_max = (float)$settings['suhu_max'];
+$kelembapan_min = (float)$settings['kelembapan_min'];
+$kelembapan_max = (float)$settings['kelembapan_max'];
+$wind_speed_min = (float)$settings['wind_speed_min'];
+$wind_speed_max = (float)$settings['wind_speed_max'];
+$air_quality_max = (float)$settings['air_quality_max'];
+$cooldown_time = (int)$settings['cooldown_time'];
+$delta_threshold = (float)$settings['delta_threshold'];
+$sensitivity_level = (string)$settings['sensitivity_level'];
 
 class NotificationSystem {
-    private static $lastNotificationTime = 0;
-    private const NOTIFICATION_COOLDOWN = 3600; // 1 hour cooldown
+    private static int $lastNotificationTime = 0;
+    private const NOTIFICATION_COOLDOWN = 3600;
 
-public static function sendEmailNotification($email, $message) {
-    $currentTime = time();
-    if (($currentTime - self::$lastNotificationTime) < self::NOTIFICATION_COOLDOWN) {
-        error_log("Notification cooldown active. Skipping email to $email");
-        return false;
-    }
+    public static function sendEmailNotification(string $email, string $message): bool {
+        $apiKey = getenv('BREVO_API_KEY');
+        if (empty($apiKey)) {
+            return false; // Skip blocking external call when not configured
+        }
 
-    $apiKey = getenv('BREVO_API_KEY'); 
-
-    $data = [
-        'sender' => [
-            'name' => 'Monitoring System',
-            'email' => 'noreply@monitoring-kenyamanan-termal.my.id'
-        ],
-        'to' => [
-            ['email' => $email]
-        ],
-        'subject' => 'Peringatan Monitoring Kenyamanan Termal',
-        'htmlContent' => '<p>' . nl2br(htmlspecialchars($message)) . '</p>',
-        'textContent' => strip_tags($message)
-    ];
-
-    $ch = curl_init('https://api.brevo.com/v3/smtp/email');
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'api-key: ' . $apiKey,
-        'Content-Type: application/json',
-        'accept: application/json'
-    ]);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
-
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $error = curl_error($ch);
-    curl_close($ch);
-
-    if ($error) {
-        error_log("Email sending failed: " . $error);
-        return false;
-    }
-
-    if ($httpCode >= 200 && $httpCode < 300) {
-        error_log("Email successfully sent to $email");
-        self::$lastNotificationTime = $currentTime;
-        $_SESSION['last_notification_time'] = $currentTime;
-        return true;
-    } else {
-        error_log("Email failed. HTTP code: $httpCode. Response: $response");
-        return false;
-    }
-}
-
-
-
-    public static function sendWhatsAppNotification($phone, $message) {
-        global $conn; // Pastikan koneksi database tersedia
-
-        if (empty($phone)) {
-            error_log("Nomor WhatsApp kosong");
+        $currentTime = time();
+        if (($currentTime - self::$lastNotificationTime) < self::NOTIFICATION_COOLDOWN) {
             return false;
         }
 
-        // Ambil API key dari database
-        $user_id = $_SESSION['user_id'];
+        $data = [
+            'sender' => [
+                'name' => 'Monitoring Kenyamanan Termal',
+                'email' => 'noreply@monitoring-kenyamanan-termal.my.id'
+            ],
+            'to' => [['email' => $email]],
+            'subject' => 'Peringatan Monitoring Kenyamanan Termal',
+            'htmlContent' => '<p>' . nl2br(htmlspecialchars($message)) . '</p>',
+            'textContent' => strip_tags($message)
+        ];
+
+        $ch = curl_init('https://api.brevo.com/v3/smtp/email');
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'api-key: ' . $apiKey,
+            'Content-Type: application/json',
+            'accept: application/json'
+        ]);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+
+        curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($httpCode >= 200 && $httpCode < 300) {
+            self::$lastNotificationTime = $currentTime;
+            return true;
+        }
+        return false;
+    }
+
+    public static function sendWhatsAppNotification(?string $phone, string $message, mysqli $conn, int $user_id): bool {
+        if (empty($phone)) {
+            return false;
+        }
         $query = $conn->prepare("SELECT apikey FROM users WHERE id = ?");
         $query->bind_param("i", $user_id);
         $query->execute();
-        $result = $query->get_result();
-        $user = $result->fetch_assoc();
+        $row = $query->get_result()->fetch_assoc();
+        $query->close();
 
-        $apikey = $user['apikey'] ?? null; // Gunakan null jika apikey tidak ditemukan
-
+        $apikey = $row['apikey'] ?? null;
         if (empty($apikey)) {
-            error_log("API Key tidak ditemukan untuk user_id: $user_id");
             return false;
         }
 
-        // Format nomor (pastikan 62...)
         $phone = ltrim($phone, '+');
-        if (substr($phone, 0, 1) === '0') {
-            $phone = '62' . substr($phone, 1); // Ganti 0 dengan 62
-        } elseif (substr($phone, 0, 2) !== '62') {
-            $phone = '62' . $phone; // Tambahkan 62 jika belum ada
+        if (str_starts_with($phone, '0')) {
+            $phone = '62' . substr($phone, 1);
+        } elseif (!str_starts_with($phone, '62')) {
+            $phone = '62' . $phone;
         }
 
         $apiUrl = "https://api.callmebot.com/whatsapp.php?" . http_build_query([
             'phone' => $phone,
-            'text'  => $message,
-            'apikey' => $apikey // Gunakan API key dari database
+            'text' => $message,
+            'apikey' => $apikey
         ]);
 
-        try {
-            $response = @file_get_contents($apiUrl);
-            if ($response === FALSE) {
-                throw new Exception("Gagal mengakses API");
-            }
-            error_log("Notifikasi WhatsApp terkirim ke $phone");
-            return true;
-        } catch (Exception $e) {
-            error_log("Error mengirim WhatsApp: " . $e->getMessage());
-            return false;
-        }
+        $ctx = stream_context_create(['http' => ['timeout' => 5]]);
+        $response = @file_get_contents($apiUrl, false, $ctx);
+        return $response !== false;
     }
 }
 
-// Authentication check
-if (!isset($_SESSION['user_id'])) {
-    header("Location: login.php");
-    exit();
-}
-
-// Get user data
-$user_id = $_SESSION['user_id'];
-$query = $conn->prepare("SELECT id, username, email, phone, profile_pic FROM users WHERE id = ?");
-$query->bind_param("i", $user_id);
-$query->execute();
-$result = $query->get_result();
-$user = $result->fetch_assoc();
-
-if (!$user) {
-    session_destroy();
-    header("Location: login.php");
-    exit();
-}
-
-// Get system settings
-$settings_query = $conn->prepare("SELECT interval_update FROM settings WHERE user_id = ?");
-$settings_query->bind_param("i", $user_id);
-$settings_query->execute();
-$settings_result = $settings_query->get_result();
-$settings = $settings_result->fetch_assoc();
-
-$interval_update = $settings['interval_update'] ?? 5; // Default 5 detik
-
-$settings_query = $conn->prepare("SELECT
-    interval_update,
-    suhu_min, suhu_max,
-    kelembapan_min, kelembapan_max,
-    wind_speed_min, wind_speed_max,
-    air_quality_max,
-    cooldown_time,
-    delta_threshold,
-    sensitivity_level
-    FROM settings WHERE user_id = ?");
-$settings_query->bind_param("i", $user_id);
-$settings_query->execute();
-$settings_result = $settings_query->get_result();
-$settings = $settings_result->fetch_assoc();
-if (!$settings) {
-    $settings = []; // Atur ke array kosong jika tidak ada hasil
-}
-
-// Set default values
-$defaults = [
-    'interval_update' => 5,
-    'suhu_min' => 25,
-    'suhu_max' => 30,
-    'kelembapan_min' => 50,
-    'kelembapan_max' => 90,
-    'wind_speed_min' => 1,
-    'wind_speed_max' => 5,
-    'air_quality_max' => 450,
-    'cooldown_time' => 600, // 10 menit default
-    'delta_threshold' => 10, // 10% perubahan
-    'sensitivity_level' => 'normal'
-];
-
-foreach ($defaults as $key => $value) {
-    $$key = $settings[$key] ?? $value;
-}
-
-// Profile picture handling
-$profile_pic = 'default-profile.png';
-if (!empty($user['profile_pic'])) {
-    $profile_pic = 'data:image/jpeg;base64,' . base64_encode($user['profile_pic']);
-}
-
 class ConditionChecker {
-    private $user, $settings, $conn, $activeAlerts = [];
+    private array $user;
+    private array $settings;
+    private mysqli $conn;
+    private array $activeAlerts = [];
 
-    public function __construct($user, $settings, $conn) {
+    public function __construct(array $user, array $settings, mysqli $conn) {
         $this->user = $user;
         $this->settings = $settings;
         $this->conn = $conn;
     }
 
-    public function checkConditions($data) {
+    public function checkConditions(array $data): void {
         $params = [
-            'temperature'   => ['min' => $this->settings['suhu_min'], 'max' => $this->settings['suhu_max']],
-            'humidity'      => ['min' => $this->settings['kelembapan_min'], 'max' => $this->settings['kelembapan_max']],
-            'wind_speed'    => ['min' => $this->settings['wind_speed_min'], 'max' => $this->settings['wind_speed_max']],
-            'air_quality'   => ['max' => $this->settings['air_quality_max']]
+            'temperature' => ['min' => $this->settings['suhu_min'], 'max' => $this->settings['suhu_max']],
+            'humidity'    => ['min' => $this->settings['kelembapan_min'], 'max' => $this->settings['kelembapan_max']],
+            'wind_speed'  => ['min' => $this->settings['wind_speed_min'], 'max' => $this->settings['wind_speed_max']],
+            'air_quality' => ['max' => $this->settings['air_quality_max']]
         ];
 
         $sensorLabels = [
             'temperature' => 'Suhu',
             'humidity' => 'Kelembapan',
-            'wind_speed' => 'Angin',
+            'wind_speed' => 'Kecepatan Angin',
             'air_quality' => 'Kualitas Udara'
         ];
 
         $messages = [];
 
         foreach ($params as $sensor => $limits) {
-            $value = $data[$sensor];
+            $value = (float)$data[$sensor];
             $status = $this->getStatus($value, $limits);
             $label = $sensorLabels[$sensor];
 
-            $shouldNotify = $this->shouldNotify($sensor, $value, $status);
-
-            if ($shouldNotify) {
+            if ($this->shouldNotify($sensor, $value, $status)) {
                 $msg = $this->generateMessage($sensor, $label, $value, $limits, $status);
-                $messages[] = $msg;
-                $this->activeAlerts[$sensor] = $msg;
+                if ($msg !== null) {
+                    $messages[] = $msg;
+                    $this->activeAlerts[$sensor] = $msg;
+                }
                 $this->updateLastAlert($sensor, $value, $status);
             }
         }
 
         if (!empty($messages)) {
-            $this->handleNotifications($messages, $data);
+            NotificationSystem::sendEmailNotification($this->user['email'], implode("\n\n", $messages));
+            NotificationSystem::sendWhatsAppNotification($this->user['phone'] ?? '', "[Alert] " . implode("\n", $messages), $this->conn, (int)$this->user['id']);
+            $this->tryLogAlertsToDatabase($messages, (int)$data['id']);
         }
     }
 
-    private function getStatus($value, $limits) {
+    private function getStatus(float $value, array $limits): string {
         if (isset($limits['max']) && $value > $limits['max']) return 'abnormal';
         if (isset($limits['min']) && $value < $limits['min']) return 'abnormal';
         return 'normal';
     }
 
-    private function shouldNotify($sensor, $value, $currentStatus) {
-        $userId = $this->user['id'];
-        $stmt = $this->conn->prepare("SELECT * FROM last_alerts WHERE user_id = ? AND sensor_type = ?");
-        $stmt->execute([$userId, $sensor]);
+    private function shouldNotify(string $sensor, float $value, string $currentStatus): bool {
+        $userId = (int)$this->user['id'];
+        $stmt = $this->conn->prepare("SELECT last_value, last_status, last_notified_at FROM last_alerts WHERE user_id = ? AND sensor_type = ?");
+        $stmt->bind_param("is", $userId, $sensor);
+        $stmt->execute();
         $last = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
 
-        $now = time();
-        $cooldown = (int)$this->settings['cooldown_time'];
-$delta = (float)$this->settings['delta_threshold'];  // Delta dalam persen, misalnya 2
+        if (!$last) return $currentStatus === 'abnormal';
 
-if (!$last) return true;
+        $prevStatus = $last['last_status'];
+        $lastValue = (float)$last['last_value'];
+        $lastNotified = strtotime($last['last_notified_at']);
 
-$prevStatus = $last['last_status'];
-$lastValue = (float)$last['last_value'];
-$lastNotified = strtotime($last['last_notified_at']);
+        if ($currentStatus !== $prevStatus) return true;
 
-if ($currentStatus !== $prevStatus) return true;
-
-if ($currentStatus === 'abnormal') {
-    // Cek perubahan makin jauh dari ambang batas
-    if ($value > $lastValue) {
-        // Kenaikan nilai
-        $percentageChange = (($value - $lastValue) / $lastValue) * 100;
-    } else {
-        // Penurunan nilai
-        $percentageChange = (($lastValue - $value) / $lastValue) * 100;
-    }
-
-    if ($percentageChange >= $delta) {
-        return true;
-    }
-
-    // Cek cooldown
-    if ($now - $lastNotified > $cooldown) return true;
-}
-
-
+        if ($currentStatus === 'abnormal') {
+            $percentageChange = ($lastValue != 0.0) ? (abs($value - $lastValue) / abs($lastValue)) * 100 : 100.0;
+            if ($percentageChange >= (float)$this->settings['delta_threshold']) {
+                return true;
+            }
+            if ((time() - $lastNotified) > (int)$this->settings['cooldown_time']) {
+                return true;
+            }
+        }
         return false;
     }
 
-    private function updateLastAlert($sensor, $value, $status) {
+    private function updateLastAlert(string $sensor, float $value, string $status): void {
         $stmt = $this->conn->prepare("
             INSERT INTO last_alerts (user_id, sensor_type, last_value, last_status, last_notified_at)
             VALUES (?, ?, ?, ?, NOW())
-            ON DUPLICATE KEY UPDATE last_value = ?, last_status = ?, last_notified_at = NOW()
+            ON DUPLICATE KEY UPDATE last_value = VALUES(last_value), last_status = VALUES(last_status), last_notified_at = NOW()
         ");
-        $stmt->execute([$this->user['id'], $sensor, $value, $status, $value, $status]);
+        $uid = (int)$this->user['id'];
+        $stmt->bind_param("isds", $uid, $sensor, $value, $status);
+        $stmt->execute();
+        $stmt->close();
     }
 
-    private function generateMessage($sensor, $label, $value, $limits, $status) {
+    private function generateMessage(string $sensor, string $label, float $value, array $limits, string $status): ?string {
         if ($status === 'normal') return null;
-        switch ($sensor) {
-            case 'temperature':
-                return $value > $limits['max']
-                    ? "⚠️ $label Tinggi: $value°C (Maks: {$limits['max']}°C). Turunkan suhu."
-                    : "⚠️ $label Rendah: $value°C (Min: {$limits['min']}°C). Naikkansuhu.";
-            case 'humidity':
-                return $value > $limits['max']
-                    ? "⚠️ $label Tinggi: $value% (Maks: {$limits['max']}%). Turunkan kelembapan."
-                    : "⚠️ $label Rendah: $value% (Min: {$limits['min']}%). Naikkan Kelembapan.";
-            case 'wind_speed':
-                return $value > $limits['max']
-                    ? "⚠️ Angin Kencang: $value m/s (Maks: {$limits['max']})"
-                    : "⚠️ Angin Lemah: $value m/s (Min: {$limits['min']})";
-            case 'air_quality':
-                return "⚠️ Kualitas Udara Buruk: $value ppm (Maks: {$limits['max']} ppm). Buka jendela untuk sirkulasi udara.";
-        }
-        return null;
+        return match ($sensor) {
+            'temperature' => $value > $limits['max']
+                ? "$label tinggi: {$value}°C (Maks: {$limits['max']}°C). Turunkan suhu AC atau tingkatkan ventilasi."
+                : "$label rendah: {$value}°C (Min: {$limits['min']}°C). Naikkan suhu ruangan.",
+            'humidity' => $value > $limits['max']
+                ? "$label tinggi: {$value}% (Maks: {$limits['max']}%). Aktifkan mode dry atau buka sirkulasi."
+                : "$label rendah: {$value}% (Min: {$limits['min']}%). Pertimbangkan humidifier.",
+            'wind_speed' => $value > $limits['max']
+                ? "Kecepatan angin tinggi: {$value} m/s (Maks: {$limits['max']} m/s)."
+                : "Sirkulasi angin lemah: {$value} m/s (Min: {$limits['min']} m/s).",
+            'air_quality' => "Kualitas udara menurun: {$value} ppm (Maks: {$limits['max']} ppm). Buka jendela untuk sirkulasi udara segar.",
+            default => null,
+        };
     }
 
-    private function handleNotifications($messages, $data) {
-        if (!empty($messages)) {
-            $emailBody = implode("\n\n", $messages);
-            $whatsappBody = "[Sistem Monitoring]\n" . implode("\n", $messages);
-
-            // Kirim email
-            NotificationSystem::sendEmailNotification($this->user['email'], $emailBody);
-
-            // Kirim WhatsApp jika nomor tersedia
-            if (!empty($this->user['phone'])) {
-                NotificationSystem::sendWhatsAppNotification(
-                    $this->user['phone'],
-                    "[Alert] " . implode("\n", $messages)
-                );
+    private function tryLogAlertsToDatabase(array $messages, int $sensorId): void {
+        $stmt = $this->conn->prepare("INSERT INTO alert_logs (user_id, sensor_id, message, created_at) VALUES (?, ?, ?, NOW())");
+        if ($stmt) {
+            $uid = (int)$this->user['id'];
+            foreach ($messages as $message) {
+                $stmt->bind_param("iis", $uid, $sensorId, $message);
+                $stmt->execute();
             }
-
-            $this->tryLogAlertsToDatabase($messages, $data['id']); // 'id' adalah sensor_id dari sensor_readings
+            $stmt->close();
         }
     }
+}
 
-    private function tryLogAlertsToDatabase($messages, $sensorId) {
-        try {
-            // Check if table exists first
-            $tableCheck = $this->conn->query("SELECT 1 FROM alert_logs LIMIT 1");
-            if ($tableCheck !== false) {
-                $stmt = $this->conn->prepare("INSERT INTO alert_logs (user_id, sensor_id, message, created_at) VALUES (?, ?, ?, NOW())");
-                foreach ($messages as $message) {
-                    $stmt->bind_param("iis", $this->user['id'], $sensorId, $message);
-                    $stmt->execute();
-                }
-            }
-        } catch (Exception $e) {
-            error_log("Failed to log alerts to database (table might not exist): " . $e->getMessage());
-        }
+// Fetch latest reading and run condition check
+$latestRes = $conn->query("SELECT id, temperature, humidity, wind_speed, air_quality, reading_time FROM sensor_readings ORDER BY reading_time DESC LIMIT 1");
+$sensor_data = ($latestRes && $latestRes->num_rows > 0) ? $latestRes->fetch_assoc() : null;
+
+if ($sensor_data) {
+    $checker = new ConditionChecker($user, $settings, $conn);
+    $checker->checkConditions($sensor_data);
+}
+
+// Fetch recent alerts for this user
+$recentAlerts = [];
+$alertStmt = $conn->prepare("SELECT message, created_at FROM alert_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 5");
+if ($alertStmt) {
+    $alertStmt->bind_param("i", $user_id);
+    $alertStmt->execute();
+    $alertRes = $alertStmt->get_result();
+    while ($row = $alertRes->fetch_assoc()) {
+        $recentAlerts[] = $row;
     }
-
-    public function getActiveAlerts() {
-        return $this->activeAlerts;
-    }
+    $alertStmt->close();
 }
 
-// Ambil data real-time dari database
-$query = "SELECT * FROM sensor_readings ORDER BY reading_time DESC LIMIT 1";
-$result = $conn->query($query);
-if ($result && $result->num_rows > 0) {
-    $sensor_data = $result->fetch_assoc(); // Perbarui $sensor_data dengan data dari database
-    $sensor_data['id'] = $sensor_data['id']; // Tambahkan sensor_id
-    error_log("Data sensor yang diperbarui: " . json_encode($sensor_data)); // Log data yang diperbarui
-} else {
-    error_log("Tidak ada data sensor yang ditemukan di database.");
-}
-
-// Initialize condition checker with database connection
-$conditionChecker = new ConditionChecker($user, $settings, $conn);
-
-// Check conditions if we have sensor data
-if (isset($sensor_data)) {
-    error_log("Data yang diteruskan ke checkConditions: " . json_encode($sensor_data));
-    $conditionChecker->checkConditions($sensor_data);
-    $activeAlerts = $conditionChecker->getActiveAlerts();
-}
+$activeNav = 'home';
+$pageTitle = 'Dashboard Pemantauan Real-Time';
 ?>
 <!DOCTYPE html>
 <html lang="id">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Monitoring Kenyamanan Termal</title>
+    <title>Dashboard — Monitoring Kenyamanan Termal</title>
     <link rel="icon" type="image/png" href="logo.png">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <?php render_theme_init_script(); ?>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="assets/css/design-system.css">
     <style>
-        body { background-color: #0d1117; color: white; }
-        .chart-container { position: relative; width: 100%; max-width: 100%; height: auto; aspect-ratio: 16 / 9; min-height: 300px; }
-        .timeframe-card {
-            padding: 12px 20px; border-radius: 10px; background: #21262d;
-            color: white; cursor: pointer; transition: 0.3s; text-align: center;
-            font-weight: bold; box-shadow: 0px 3px 10px rgba(0, 0, 0, 0.2);
+        .dashboard-hero-grid {
+            display: grid;
+            grid-template-columns: minmax(300px, 370px) 1fr;
+            gap: 20px;
+            margin-bottom: 22px;
         }
-        .timeframe-card:hover, .timeframe-card.active { background: #30363d; transform: scale(1.05); }
-        .alert { background: red; color: white; padding: 10px; margin-top: 10px; border-radius: 5px; display: none; }
-        .dark-mode { background-color: cbd5e1; color: #333; }
-        .dark-mode .bg-gray-900 { background: #ffffff; color: black; }
-        .dark-mode .bg-gray-800 { background: #e2e8f0; color: black; }
-        .dark-mode .timeframe-card { background: #e2e8f0; color: black; }
-        .dark-mode .timeframe-card:hover, .dark-mode .timeframe-card.active { background: #cbd5e1; }
-        .navbar.scrolled { background: rgba(13, 17, 23, 0.48); }
-        /* Sidebar Styles */
-        #sidebar {
-            position: fixed;
-            top: 0;
-            left: -250px;
-            width: 250px;
-            height: 100%;
-            background: rgba(33, 38, 45, 0.9);
-            transition: left 0.3s;
-            z-index: 1000;
-        }
-        #sidebar.active {
-            left: 0;
-        }
-        #sidebar .nav-links {
-            padding: 20px;
-        }
-        #sidebar .nav-links a {
-            display: block;
-            padding: 10px 0;
-            text-decoration: none;
-            transition: color 0.3s, text-shadow 0.3s;
-        }
-        #sidebar .nav-links a:hover {
-            color: #4a90e2;
-        }
-        /* Logout Style */
-        #sidebar .nav-links a.logout {
-            color: #e74c3c; /* Merah */
-        }
-        #sidebar .nav-links a.logout:hover {
-            color: #ff6b6b; /* Lebih terang */
-            text-shadow: 0 0 8px rgba(255, 107, 107, 0.8); /* Shadow merah menyala */
-        }
-        #overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.5);
-            display: none;
-            z-index: 999;
-        }
-        #overlay.active {
-            display: block;
-        }
-        /* Pop-up Modal */
-        .modal {
-            display: none;
-            position: fixed;
-            z-index: 1000;
-            left: 0;
-            top: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0, 0, 0, 0.8);
+        .comfort-card {
             display: flex;
-            justify-content: center;
-            align-items: center;
-            animation: fadeIn 0.3s ease-in-out;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 24px;
+            background:
+                radial-gradient(circle at 90% 10%, var(--brand-primary-soft), transparent 55%),
+                var(--bg-surface);
         }
-        .modal-content {
-            background: rgba(255, 0, 0, 0.85); /* Red with transparency */
-            color: white;
-            padding: 20px;
-            border-radius: 8px;
-            text-align: center;
-            width: 350px;
-            font-size: 18px;
-            font-weight: bold;
-            box-shadow: 0px 4px 15px rgba(255, 0, 0, 0.7);
-            animation: pulse 1.5s infinite alternate;
-            backdrop-filter: blur(5px);
-        }
-        .modal-content button {
-            margin-top: 10px;
-            padding: 8px 15px;
-            border: none;
-            background: white;
-            color: red;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            border-radius: 5px;
-            transition: 0.3s;
-        }
-        .modal-content button:hover {
-            background: black;
-            color: white;
-        }
-        .sticky-alert {
-            position: fixed;
-            top: 60px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(255, 0, 0, 0.85); /* Same red with transparency */
-            color: white;
-            padding: 8px 20px;
-            font-weight: bold;
-            font-size: 16px;
-            width: auto;
-            max-width: 90%;
-            text-align: center;
-            border-radius: 5px;
-            box-shadow: 0px 4px 10px rgba(255, 0, 0, 0.5);
-            z-index: 800;
-            display: none;
-            backdrop-filter: blur(3px);
-        }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: scale(0.8); }
-            to { opacity: 1; transform: scale(1); }
-        }
-        @keyframes pulse {
-            from { transform: scale(1); }
-            to { transform: scale(1.1); }
-        }
-        @keyframes slideDown {
-            from { opacity: 0; transform: translateY(-20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes slideUp {
-            from { opacity: 1; transform: translateY(0); }
-            to { opacity: 0; transform: translateY(-20px); }
-        }
-        .dropdown-content {
-            opacity: 0;
-            transform: scale(0.95);
-            transform-origin: top right;
-            transition: opacity 0.3s ease-out, transform 0.3s ease-out;
-        }
-        .dropdown-content.active {
-            opacity: 1;
-            transform: scale(1);
-        }
-        #profileDropdown a {
-            opacity: 0.5;
-            pointer-events: none;
-        }
-        #profileDropdown.active a {
-            opacity: 1;
-            pointer-events: auto;
-        }
-        .alert-danger {
-            background: rgba(255, 0, 0, 0.9);
-            box-shadow: 0px 4px 10px rgba(255, 0, 0, 0.5);
-        }
-        .alert-warning {
-            background: rgba(255, 165, 0, 0.9);
-            box-shadow: 0px 4px 10px rgba(255, 165, 0, 0.5);
-        }
-        .alert-info {
-            background: rgba(0, 0, 255, 0.9);
-            box-shadow: 0px 4px 10px rgba(0, 0, 255, 0.5);
-        }
-        .modal {
-            display: none;
-            position: fixed;
-            z-index: 1000;
-            left: 0;
-            top: 0;
-            width: 100%;
-            height: 100%;
-            background-color: rgba(0, 0, 0, 0.5);
-            justify-content: center;
-            align-items: center;
-            opacity: 0;
-            transition: opacity 0.3s ease;
-        }
-        .modal.show {
+        .comfort-gauge-row {
             display: flex;
-            opacity: 1;
+            align-items: center;
+            gap: 20px;
+            margin: 18px 0;
+        }
+        .gauge-wrap {
+            position: relative;
+            width: 112px;
+            height: 112px;
+            flex-shrink: 0;
+        }
+        .gauge-center {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        .gauge-score {
+            font-size: 28px;
+            font-weight: 800;
+            line-height: 1;
+            color: var(--text-primary);
+        }
+        .gauge-unit {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-weight: 600;
+            margin-top: 3px;
+        }
+        .recommendation-box {
+            padding: 13px 15px;
+            border-radius: var(--radius-md);
+            background: var(--bg-surface-2);
+            border: 1px solid var(--border-subtle);
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+        .sensor-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+        }
+        .sensor-card {
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            transition: border-color 0.2s ease, transform 0.15s ease;
+        }
+        .sensor-card:hover {
+            border-color: var(--border-default);
+        }
+        .sensor-card-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .sensor-icon-badge {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 17px;
+        }
+        .sensor-value-row {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            margin-top: 14px;
+        }
+        .sensor-value {
+            font-size: 32px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            line-height: 1.1;
+            color: var(--text-primary);
+        }
+        .sensor-unit {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+        .sensor-meta-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 8px;
+        }
+        .chart-canvas-wrap {
+            position: relative;
+            height: 360px;
+            width: 100%;
+            min-width: 0;
+            overflow: hidden;
+        }
+        .dashboard-hero-grid > *,
+        .dashboard-bottom-grid > * {
+            min-width: 0;
+        }
+        .dashboard-bottom-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 340px;
+            gap: 20px;
+        }
+        .alert-feed-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 13px 0;
+            border-bottom: 1px solid var(--border-subtle);
+            font-size: 13px;
+        }
+        .alert-feed-item:last-child {
+            border-bottom: none;
+            padding-bottom: 0;
+        }
+        .live-alert-strip {
+            display: none;
+            margin-bottom: 20px;
+        }
+        @media (max-width: 1180px) {
+            .dashboard-hero-grid {
+                grid-template-columns: 1fr;
+            }
+            .dashboard-bottom-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        @media (max-width: 640px) {
+            .sensor-grid {
+                grid-template-columns: 1fr;
+            }
+            .chart-canvas-wrap {
+                height: 280px;
+            }
+            .sensor-value {
+                font-size: 28px;
+            }
         }
     </style>
 </head>
-<body class="flex flex-col items-center justify-center min-h-screen">
-    <!-- Navbar -->
-    <nav id="navbar" class="navbar w-full bg-gray-900 text-white p-4 flex justify-between items-center shadow-lg fixed top-0 left-0 z-50">
-        <h1 class="text-2xl font-bold">📡 Monitoring Kenyamanan Termal</h1>
-        <button id="menuToggle" class="md:hidden text-2xl">☰</button>
-        <div id="navLinks" class="hidden md:flex space-x-6 items-center">
-            <a href="index.php" class="hover:text-blue-400">🏠 Beranda</a>
-            <a href="history.php" class="hover:text-blue-400">📜 Data Historis</a>
-            <a href="settings.php" class="hover:text-blue-400">⚙️ Pengaturan</a>
-            <a href="about.php" class="hover:text-blue-400">ℹ️ Bantuan</a>
+<body>
+<div class="app-shell">
+    <?php include 'nav.php'; ?>
 
-<!-- Profile Dropdown -->
-<div class="relative">
-    <button id="profileBtn" class="flex items-center space-x-2 px-3 py-2 rounded-md transition-all duration-300 transform hover:scale-105">
-        <?php if (!empty($user['profile_pic'])): ?>
-    <img src="<?= htmlspecialchars($user['profile_pic']) ?>" 
-     class="w-12 h-12 rounded-full object-cover" 
-     alt="Profile">
-<?php else: ?>
-    <div class="w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center">
-        <i class="fas fa-user text-xl"></i>
-    </div>
-<?php endif; ?>
-        <span class="font-medium <?php echo $bodyClass; ?>"><?php echo $user['username']; ?></span>
-        <svg class="w-4 h-4 text-gray-400 transform transition-transform duration-300" fill="currentColor" viewBox="0 0 20 20" id="dropdownArrow">
-                        <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a 1 1 0 01-1.414 0l-4-4a 1 1 0 010-1.414z" clip-rule="evenodd"></path>
-                    </svg>
-    </button>
-<!-- Di dalam bagian dropdown profil -->
-<div id="profileDropdown" class="dropdown-content absolute right-0 mt-2 w-56 bg-gray-800 rounded-lg shadow-2xl overflow-hidden transform opacity-0 scale-95 origin-top-right transition-all duration-300 ease-out pointer-events-none">
-    <!-- Profile Section -->
-    <div class="p-4 text-center border-b border-gray-700">  <!-- Added border bottom -->
-    <?php if (!empty($user['profile_pic'])): ?>
-        <img src="<?= htmlspecialchars($user['profile_pic']) ?>" 
-     class="w-12 h-12 rounded-full object-cover" 
-     alt="Profile">
-    <?php else: ?>
-        <div class="w-16 h-16 rounded-full bg-gray-600 flex items-center justify-center mx-auto border-2 border-blue-400 hover:border-blue-500 transition-all duration-300">
-            <i class="fas fa-user text-white text-2xl"></i> <!-- Ikon default -->
-        </div>
-    <?php endif; ?>
-    <p class="font-bold mt-2"><?php echo $user['username']; ?></p>
-    <p class="text-gray-400 text-sm"><?php echo $user['email']; ?></p>
-    <p class="text-gray-400 text-sm"><?php echo $user['phone']; ?></p>
-</div>
-
-        <!-- Logout Section -->
-    <div class="p-2 bg-gray-750">  <!-- Slightly darker background for contrast -->
-        <a href="logout.php" class="flex items-center justify-center px-4 py-2 text-red-400 hover:bg-gray-700 hover:text-red-500 transition-all duration-300">
-    <span>Logout</span>
-    <svg class="w-5 h-5 ml-2 text-red-400 inline-block" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1m0-13V4m0 8H3m14 0H7" />
-    </svg>
-</a>
-
-    </div>
-</div>
-</div>
-<button id="toggleMode" class="px-3 py-1 rounded-md transition-all duration-300 transform hover:scale-105">🌙</button>
-        </div>
-    </nav>
-
-
-    <div id="sidebar">
-    <div class="nav-links">
-        <a href="index.php" class="hover:text-blue-400">🏠 Beranda</a>
-        <a href="history.php" class="hover:text-blue-400">📜 Data Historis</a>
-        <a href="settings.php" class="hover:text-blue-400">⚙️ Pengaturan</a>
-        <a href="about.php" class="hover:text-blue-400">ℹ️ Bantuan</a>
-        <a href="logout.php" class="logout">
-    <svg class="w-4 h-4 mr-1 inline text-red-400 transition-all duration-300" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7" />
-    </svg>
-    Logout
-</a>
-
-
-        <button id="toggleModeSidebar" class="px-3 py-1 rounded-md mt-4">🌙</button>
-    </div>
-</div>
-
-    <!-- Overlay -->
-    <div id="overlay"></div>
-    <div class="w-full max-w-6xl bg-gray-900 p-6 rounded-lg shadow-xl mt-20">
-        <h2 class="text-4xl font-bold text-center mb-6">📡 Sensor Monitoring Dashboard</h2>
-
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-6 text-center">
-            <div class="p-6 bg-gray-800 rounded-lg shadow-md">
-                <p class="text-lg">🌡️ Temperature</p>
-                <h3 class="text-3xl font-bold" id="temperature">- °C</h3>
+    <main class="app-content">
+        <!-- Live Active Alert Banner (appears only when threshold is breached) -->
+        <div id="liveAlertBanner" class="alert-banner is-error live-alert-strip" role="alert">
+            <i class="fas fa-triangle-exclamation" style="font-size: 17px; margin-top: 2px;"></i>
+            <div style="flex: 1;">
+                <strong style="display: block; margin-bottom: 2px;">Peringatan Ambang Batas Sensor</strong>
+                <div id="liveAlertText"></div>
             </div>
-            <div class="p-6 bg-gray-800 rounded-lg shadow-md">
-                <p class="text-lg">💧 Humidity</p>
-                <h3 class="text-3xl font-bold" id="humidity">- %</h3>
-            </div>
-            <div class="p-6 bg-gray-800 rounded-lg shadow-md">
-                <p class="text-lg">🌫️ Air Quality</p>
-                <h3 class="text-3xl font-bold" id="CO2">- CO2</h3>
-            </div>
-            <div class="p-6 bg-gray-800 rounded-lg shadow-md">
-                <p class="text-lg">🌬️ Wind Speed</p>
-                <h3 class="text-3xl font-bold" id="wind_speed">- m/s</h3>
-            </div>
+            <button type="button" id="dismissAlertBtn" class="btn-ds btn-ds-ghost btn-ds-sm" style="color: inherit;">Tutup</button>
         </div>
 
-        <div class="chart-container mt-6">
-            <canvas id="sensorChart"></canvas>
-        </div>
+        <!-- Asymmetric Hero Overview: Comfort Index + 4 Precision Telemetry Cards -->
+        <section class="dashboard-hero-grid" aria-label="Ringkasan Kondisi Termal">
+            <div class="surface-card comfort-card">
+                <div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+                        <span style="font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted);">
+                            Indeks Kenyamanan
+                        </span>
+                        <span class="badge-pill badge-neutral" id="comfortBadge">Memuat...</span>
+                    </div>
 
-        <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mt-6">
-            <div class="timeframe-card active" onclick="setTimeframe(this, 'latest')">Last 1 Hours</div>
-            <div class="timeframe-card" onclick="setTimeframe(this, 'daily')">Last 24 Hours</div>
-            <div class="timeframe-card" onclick="setTimeframe(this, 'weekly')">Last Week</div>
-            <div class="timeframe-card" onclick="setTimeframe(this, 'monthly')">Last Month</div>
-            <div class="timeframe-card" onclick="setTimeframe(this, 'yearly')">Last Year</div>
-        </div>
+                    <div class="comfort-gauge-row">
+                        <div class="gauge-wrap">
+                            <svg viewBox="0 0 120 120" width="112" height="112" style="transform: rotate(-90deg);">
+                                <circle cx="60" cy="60" r="48" fill="none" stroke="var(--bg-surface-3)" stroke-width="10"/>
+                                <circle id="comfortRing" cx="60" cy="60" r="48" fill="none" stroke="var(--brand-primary)" stroke-width="10"
+                                        stroke-linecap="round" stroke-dasharray="301.59" stroke-dashoffset="301.59"
+                                        style="transition: stroke-dashoffset 0.6s ease, stroke 0.3s ease;"/>
+                            </svg>
+                            <div class="gauge-center">
+                                <span class="gauge-score mono" id="comfortScore">--</span>
+                                <span class="gauge-unit">/ 100</span>
+                            </div>
+                        </div>
+                        <div>
+                            <h2 id="comfortTitle" style="font-size: 19px; font-weight: 800; margin: 0 0 4px 0; color: var(--text-primary);">Menghitung...</h2>
+                            <p id="comfortSubtitle" style="font-size: 13px; color: var(--text-secondary); margin: 0;">
+                                Menyelaraskan data sensor dengan batas kenyamanan Anda.
+                            </p>
+                        </div>
+                    </div>
+                </div>
 
-        <p id="loading" class="text-center text-gray-400 mt-4">🔄 Memuat data...</p>
-    </div>
-<div id="alertModal" class="modal">
-    <div class="modal-content">
-        <h2>⚠️ Peringatan!</h2>
-        <p id="alertMessage"></p>
-        <button onclick="moveAlertToBottom()">OK</button>
-    </div>
+                <div>
+                    <div class="recommendation-box">
+                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 5px; color: var(--text-primary); font-weight: 700; font-size: 12.5px;">
+                            <i class="fas fa-lightbulb" style="color: var(--brand-primary);"></i>
+                            <span>Rekomendasi Ruangan</span>
+                        </div>
+                        <div id="comfortRecommendation">Menunggu pembacaan terbaru dari perangkat sensor...</div>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 12px; font-size: 12px; color: var(--text-muted);">
+                        <span>Pembaruan terakhir: <strong class="mono" id="lastUpdatedAt">--:--</strong></span>
+                        <span>Interval: <strong class="mono"><?= $interval_update ?>d</strong></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 4 Sensor Cards -->
+            <div class="sensor-grid">
+                <!-- Temperature -->
+                <article class="surface-card sensor-card">
+                    <div class="sensor-card-top">
+                        <div style="display: flex; align-items: center; gap: 11px;">
+                            <span class="sensor-icon-badge" style="background: var(--sensor-temp-soft); color: var(--sensor-temp);">
+                                <i class="fas fa-temperature-half"></i>
+                            </span>
+                            <div>
+                                <div style="font-size: 14px; font-weight: 700; color: var(--text-primary);">Suhu Udara</div>
+                                <div style="font-size: 12px; color: var(--text-muted);">Temperature</div>
+                            </div>
+                        </div>
+                        <span class="badge-pill badge-neutral" id="status-temp">--</span>
+                    </div>
+                    <div class="sensor-value-row">
+                        <span class="sensor-value mono" id="temperature">--</span>
+                        <span class="sensor-unit">°C</span>
+                    </div>
+                    <div class="threshold-bar"><div class="threshold-bar-fill" id="bar-temp" style="width: 0%; background: var(--sensor-temp);"></div></div>
+                    <div class="sensor-meta-row">
+                        <span>Target: <strong class="mono"><?= $suhu_min ?>–<?= $suhu_max ?>°C</strong></span>
+                        <a href="settings.php?tab=preferences" style="font-size: 11.5px;">Ubah</a>
+                    </div>
+                </article>
+
+                <!-- Humidity -->
+                <article class="surface-card sensor-card">
+                    <div class="sensor-card-top">
+                        <div style="display: flex; align-items: center; gap: 11px;">
+                            <span class="sensor-icon-badge" style="background: var(--sensor-humid-soft); color: var(--sensor-humid);">
+                                <i class="fas fa-droplet"></i>
+                            </span>
+                            <div>
+                                <div style="font-size: 14px; font-weight: 700; color: var(--text-primary);">Kelembapan</div>
+                                <div style="font-size: 12px; color: var(--text-muted);">Relative Humidity</div>
+                            </div>
+                        </div>
+                        <span class="badge-pill badge-neutral" id="status-humid">--</span>
+                    </div>
+                    <div class="sensor-value-row">
+                        <span class="sensor-value mono" id="humidity">--</span>
+                        <span class="sensor-unit">%</span>
+                    </div>
+                    <div class="threshold-bar"><div class="threshold-bar-fill" id="bar-humid" style="width: 0%; background: var(--sensor-humid);"></div></div>
+                    <div class="sensor-meta-row">
+                        <span>Target: <strong class="mono"><?= $kelembapan_min ?>–<?= $kelembapan_max ?>%</strong></span>
+                        <a href="settings.php?tab=preferences" style="font-size: 11.5px;">Ubah</a>
+                    </div>
+                </article>
+
+                <!-- Air Quality -->
+                <article class="surface-card sensor-card">
+                    <div class="sensor-card-top">
+                        <div style="display: flex; align-items: center; gap: 11px;">
+                            <span class="sensor-icon-badge" style="background: var(--sensor-co2-soft); color: var(--sensor-co2);">
+                                <i class="fas fa-lungs"></i>
+                            </span>
+                            <div>
+                                <div style="font-size: 14px; font-weight: 700; color: var(--text-primary);">Kualitas Udara</div>
+                                <div style="font-size: 12px; color: var(--text-muted);">Konsentrasi CO₂</div>
+                            </div>
+                        </div>
+                        <span class="badge-pill badge-neutral" id="status-co2">--</span>
+                    </div>
+                    <div class="sensor-value-row">
+                        <span class="sensor-value mono" id="CO2">--</span>
+                        <span class="sensor-unit">ppm</span>
+                    </div>
+                    <div class="threshold-bar"><div class="threshold-bar-fill" id="bar-co2" style="width: 0%; background: var(--sensor-co2);"></div></div>
+                    <div class="sensor-meta-row">
+                        <span>Batas Maks: <strong class="mono"><?= $air_quality_max ?> ppm</strong></span>
+                        <a href="settings.php?tab=preferences" style="font-size: 11.5px;">Ubah</a>
+                    </div>
+                </article>
+
+                <!-- Wind Speed -->
+                <article class="surface-card sensor-card">
+                    <div class="sensor-card-top">
+                        <div style="display: flex; align-items: center; gap: 11px;">
+                            <span class="sensor-icon-badge" style="background: var(--sensor-wind-soft); color: var(--sensor-wind);">
+                                <i class="fas fa-wind"></i>
+                            </span>
+                            <div>
+                                <div style="font-size: 14px; font-weight: 700; color: var(--text-primary);">Kecepatan Angin</div>
+                                <div style="font-size: 12px; color: var(--text-muted);">Airflow Velocity</div>
+                            </div>
+                        </div>
+                        <span class="badge-pill badge-neutral" id="status-wind">--</span>
+                    </div>
+                    <div class="sensor-value-row">
+                        <span class="sensor-value mono" id="wind_speed">--</span>
+                        <span class="sensor-unit">m/s</span>
+                    </div>
+                    <div class="threshold-bar"><div class="threshold-bar-fill" id="bar-wind" style="width: 0%; background: var(--sensor-wind);"></div></div>
+                    <div class="sensor-meta-row">
+                        <span>Target: <strong class="mono"><?= $wind_speed_min ?>–<?= $wind_speed_max ?> m/s</strong></span>
+                        <a href="settings.php?tab=preferences" style="font-size: 11.5px;">Ubah</a>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <!-- Main Chart + Recent Alert Log -->
+        <section class="dashboard-bottom-grid">
+            <div class="surface-card">
+                <div class="surface-card-header">
+                    <div>
+                        <h2 class="surface-card-title">Tren Parameter Lingkungan</h2>
+                        <p class="surface-card-sub">Sumbu kiri: Suhu (°C), Kelembapan (%), Angin (m/s) · Sumbu kanan: CO₂ (ppm)</p>
+                    </div>
+                    <div class="segmented-control" role="tablist" aria-label="Rentang waktu grafik">
+                        <button type="button" class="segmented-btn is-active" data-tf="latest">1 Jam</button>
+                        <button type="button" class="segmented-btn" data-tf="daily">24 Jam</button>
+                        <button type="button" class="segmented-btn" data-tf="weekly">7 Hari</button>
+                        <button type="button" class="segmented-btn" data-tf="monthly">30 Hari</button>
+                        <button type="button" class="segmented-btn" data-tf="yearly">1 Tahun</button>
+                    </div>
+                </div>
+                <div class="surface-card-body">
+                    <div id="chartLoading" style="text-align: center; padding: 12px 0; font-size: 13px; color: var(--text-muted);">
+                        <i class="fas fa-spinner fa-spin" style="margin-right: 6px;"></i>Memuat data grafik...
+                    </div>
+                    <div class="chart-canvas-wrap">
+                        <canvas id="sensorChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recent Alerts & Quick Actions -->
+            <div class="surface-card" style="display: flex; flex-direction: column;">
+                <div class="surface-card-header">
+                    <div>
+                        <h2 class="surface-card-title">Log Peringatan Terbaru</h2>
+                        <p class="surface-card-sub">Notifikasi ambang batas tercatat</p>
+                    </div>
+                    <a href="settings.php?tab=preferences" class="btn-ds btn-ds-secondary btn-ds-sm">Atur Batas</a>
+                </div>
+                <div class="surface-card-body" style="flex: 1;">
+                    <?php if (empty($recentAlerts)): ?>
+                        <div style="text-align: center; padding: 36px 12px; color: var(--text-muted);">
+                            <i class="fas fa-circle-check" style="font-size: 28px; color: var(--status-optimal); margin-bottom: 10px; display: block;"></i>
+                            <div style="font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">Tidak ada peringatan</div>
+                            <div style="font-size: 12.5px;">Semua parameter ruangan berada dalam batas normal.</div>
+                        </div>
+                    <?php else: ?>
+                        <?php foreach ($recentAlerts as $al): ?>
+                            <div class="alert-feed-item">
+                                <span style="width: 28px; height: 28px; border-radius: 8px; background: var(--status-warning-soft); color: var(--status-warning); display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;">
+                                    <i class="fas fa-bell" style="font-size: 12px;"></i>
+                                </span>
+                                <div style="min-width: 0;">
+                                    <div style="color: var(--text-primary); line-height: 1.45;"><?= htmlspecialchars(preg_replace('/^⚠️\s*/u', '', $al['message'])) ?></div>
+                                    <div class="mono" style="font-size: 11.5px; color: var(--text-muted); margin-top: 3px;"><?= htmlspecialchars($al['created_at']) ?></div>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="app-footer">
+        <span>&copy; <?= date('Y') ?> Monitoring Kenyamanan Termal. All rights reserved.</span>
+        <span>Arduino MKR Wi-Fi 1010 Telemetry Platform</span>
+    </footer>
+</div>
 </div>
 
-<!-- Sticky Alert -->
-<div id="stickyAlert" class="sticky-alert">
-    <p id="stickyMessage"></p>
-</div>
+<script>
+(function() {
+    const CONFIG = {
+        intervalMs: <?= max(2000, $interval_update * 1000) ?>,
+        suhuMin: <?= $suhu_min ?>,
+        suhuMax: <?= $suhu_max ?>,
+        humidMin: <?= $kelembapan_min ?>,
+        humidMax: <?= $kelembapan_max ?>,
+        windMin: <?= $wind_speed_min ?>,
+        windMax: <?= $wind_speed_max ?>,
+        co2Max: <?= $air_quality_max ?>
+    };
 
-    <script>
-        const toggleModeBtn = document.getElementById("toggleMode");
-        const toggleModeSidebar = document.getElementById("toggleModeSidebar");
-        const body = document.body;
-        const navbar = document.getElementById("navbar");
-        document.getElementById("menuToggle").addEventListener("click", function() {
-            document.getElementById("sidebar").classList.toggle("active");
-            document.getElementById("overlay").classList.toggle("active");
-        });
-        const sidebar = document.getElementById("sidebar");
-        const overlay = document.getElementById("overlay");
+    let currentTimeframe = 'latest';
+    let sensorChart = null;
+    let alertDismissed = false;
 
-        toggleModeBtn.addEventListener("click", () => {
-            body.classList.toggle("dark-mode");
-            toggleModeBtn.textContent = body.classList.contains("dark-mode") ? "☀️" : "🌙";
-        });
+    document.getElementById('dismissAlertBtn').addEventListener('click', function() {
+        alertDismissed = true;
+        document.getElementById('liveAlertBanner').style.display = 'none';
+    });
 
-        toggleModeSidebar.addEventListener("click", () => {
-            body.classList.toggle("dark-mode");
-            toggleModeSidebar.textContent = body.classList.contains("dark-mode") ? "☀️" : "🌙";
-        });
-
-        menuToggle.addEventListener("click", () => {
-            sidebar.classList.toggle("active");
-            overlay.classList.toggle("active");
-        });
-
-        overlay.addEventListener("click", () => {
-            sidebar.classList.remove("active");
-            overlay.classList.remove("active");
-        });
-
-        window.addEventListener("scroll", () => {
-            navbar.classList.toggle("scrolled", window.scrollY > 50);
-        });
-
-        let sensorChart;
-        let currentTimeframe = "latest";
-        let sensorData = [];
-
-        // Fungsi untuk mengambil data real-time (untuk card overlay)
-        async function fetchRealtimeData() {
-            try {
-                let response = await fetch(`get_data.php?timeframe=realtime`);
-                let result = await response.json();
-                console.log("Data real-time dari API:", result.data); // Tambahkan log ini
-                if (result.data.length > 0) {
-                    let latestData = result.data[0]; // Ambil data terbaru
-                    console.log("Data yang diteruskan ke checkConditions:", latestData); // Tambahkan log ini
-                    document.getElementById("temperature").innerText = latestData.temperature + " °C";
-                    document.getElementById("humidity").innerText = latestData.humidity + " %";
-                    document.getElementById("CO2").innerText = latestData.air_quality + " CO2";
-                    document.getElementById("wind_speed").innerText = latestData.wind_speed + " m/s";
-
-                    // Kirim data terbaru ke fungsi checkConditions
-                    checkConditions(latestData); updateStickyAlert();
-                } else {
-                    console.warn("No real-time data available.");
-                }
-            } catch (error) {
-                console.error("Error fetching real-time data:", error);
-            }
-        }
-
-        // Fungsi untuk mengambil data dari 1 jam terakhir (untuk grafik)
-        async function fetchSensorData() {
-            try {
-                let response = await fetch(`get_data.php?timeframe=${currentTimeframe}`);
-                let result = await response.json();
-                sensorData = result.data;
-
-                if (sensorData.length > 0) {
-                    updateChart(sensorData);
-                } else {
-                    console.warn("No data found for the selected timeframe.");
-                }
-            } catch (error) {
-                console.error("Error fetching sensor data:", error);
-            }
-        }
-
-        // Fungsi untuk memperbarui grafik
-        function updateChart(data) {
-            data.reverse();
-        
-            let labels = data.map(entry => {
-                const date = new Date(entry.reading_time);
-        
-                if (currentTimeframe === "latest" || currentTimeframe === "daily") {
-                    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); // HH:MM
-                } else if (currentTimeframe === "weekly" || currentTimeframe === "monthly") {
-                    return date.toLocaleDateString([], { day: '2-digit', month: 'short' }); // 14 Jun
-                } else if (currentTimeframe === "yearly") {
-                    return date.toLocaleDateString([], { month: 'short', year: 'numeric' }); // Jun 2024
-                } else {
-                    return date.toLocaleString(); // fallback
-                }
-            });
-        
-            sensorChart.data.labels = labels;
-            sensorChart.data.datasets[0].data = data.map(entry => entry.temperature);
-            sensorChart.data.datasets[1].data = data.map(entry => entry.humidity);
-            sensorChart.data.datasets[2].data = data.map(entry => entry.air_quality);
-            sensorChart.data.datasets[3].data = data.map(entry => entry.wind_speed);
-            sensorChart.update();
-        }
-
-        // Inisialisasi grafik
-        function createChart() {
-            let ctx = document.getElementById("sensorChart").getContext("2d");
-            sensorChart = new Chart(ctx, {
-                type: "line",
-                data: {
-                    labels: [],
-                    datasets: [
-                        { label: "Temp (°C)", data: [], borderColor: "red", borderWidth: 1, pointRadius: 0, fill: true, backgroundColor: "rgba(255, 99, 132, 0.1)", tension: 0.2 },
-                        { label: "Humidity (%)", data: [], borderColor: "blue", borderWidth: 1, pointRadius: 0, fill: true, backgroundColor: "rgba(54, 162, 235, 0.1)", tension: 0.2 },
-                        { label: "Air Quality (CO2)", data: [], borderColor: "green", borderWidth: 1, pointRadius: 0, fill: true, backgroundColor: "rgba(75, 192, 192, 0.1)", tension: 0.2 },
-                        { label: "Wind Speed (m/s)", data: [], borderColor: "orange", borderWidth: 1, pointRadius: 0, fill: true, backgroundColor: "rgba(255, 159, 64, 0.1)", tension: 0.2 }
-                    ]
-                },
-                options: { responsive: true, maintainAspectRatio: false }
-            });
-        }
-        let intervalUpdate = <?= $interval_update * 1000 ?>; // Konversi detik ke milidetik
-        // Jalankan fungsi secara berkala
-        createChart();
-        fetchRealtimeData(); // Ambil data real-time untuk card overlay
-        fetchSensorData(); // Ambil data untuk grafik
-        setInterval(fetchRealtimeData, intervalUpdate);
-setInterval(fetchSensorData, intervalUpdate);
-
-
-        function showModal(message) {
-            document.getElementById("alertMessage").innerText = message;
-            document.getElementById("alertModal").style.display = "flex";
-        }
-
-        let COOLDOWN_DURATION = <?= $cooldown_time * 1000 ?>; // Konversi detik ke milidetik
-        let DELTA_THRESHOLD = <?= $delta_threshold ?>; // Ambil dari database
-        let SENSITIVITY_LEVEL = '<?= $sensitivity_level ?>'; // Ambil dari database
-        
-        // Variabel untuk tracking status
-        let lastSensorValues = {
-            temperature: null,
-            humidity: null,
-            air_quality: null,
-            wind_speed: null
+    function getChartPalette() {
+        const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+        return {
+            grid: isLight ? 'rgba(15, 23, 42, 0.08)' : 'rgba(148, 163, 184, 0.12)',
+            tick: isLight ? '#475569' : '#94a3b8',
+            legend: isLight ? '#0f172a' : '#e2e8f0'
         };
-        
-        let alertCooldown = false;
-        let activeAlerts = {};
+    }
 
-        function checkConditions(data) {
-            console.log("Data sensor terbaru:", data);
-            
-            // Skip jika ini adalah pembacaan pertama
-            if (lastSensorValues.temperature === null) {
-                lastSensorValues = {...data};
-                return;
-            }
-        
-            const newAlerts = {};
-            const settings = {
-                suhu_max: <?= $suhu_max ?>,
-                suhu_min: <?= $suhu_min ?>,
-                kelembapan_max: <?= $kelembapan_max ?>,
-                kelembapan_min: <?= $kelembapan_min ?>,
-                wind_speed_max: <?= $wind_speed_max ?>,
-                wind_speed_min: <?= $wind_speed_min ?>,
-                air_quality_max: <?= $air_quality_max ?>,
-                delta_threshold: DELTA_THRESHOLD,
-                sensitivity: SENSITIVITY_LEVEL
-            };
-        
-            // Fungsi helper untuk menghitung perubahan persentase
-            function calculateChange(oldVal, newVal) {
-                if (oldVal === 0) return Infinity; // Hindari pembagian dengan nol
-                return Math.abs((newVal - oldVal) / oldVal) * 100;
-            }
-        
-            // Pengecekan untuk setiap sensor
-            // Temperature
-            if (data.temperature > settings.suhu_max) {
-                const change = calculateChange(lastSensorValues.temperature, data.temperature);
-                if (settings.sensitivity === 'sensitif' || change >= settings.delta_threshold) {
-                    newAlerts.tempHigh = `⚠️ Suhu tinggi. Melebihi batas maksimal (${settings.suhu_max}°C). Turunkan suhu.`;
-                }
-            } else if (data.temperature < settings.suhu_min) {
-                const change = calculateChange(lastSensorValues.temperature, data.temperature);
-                if (settings.sensitivity === 'sensitif' || change >= settings.delta_threshold) {
-                    newAlerts.tempLow = `⚠️ Suhu rendah. Di bawah batas minimal (${settings.suhu_min}°C). Naikkan suhu.`;
-                }
-            }
-        
-            // Humidity
-            if (data.humidity > settings.kelembapan_max) {
-                const change = calculateChange(lastSensorValues.humidity, data.humidity);
-                if (settings.sensitivity === 'sensitif' || change >= settings.delta_threshold) {
-                    newAlerts.humidHigh = `⚠️ Kelembapan tinggi. Melebihi batas maksimal (${settings.kelembapan_max}%). Turunkan kelembapan.`;
-                }
-            } else if (data.humidity < settings.kelembapan_min) {
-                const change = calculateChange(lastSensorValues.humidity, data.humidity);
-                if (settings.sensitivity === 'sensitif' || change >= settings.delta_threshold) {
-                    newAlerts.humidLow = `⚠️ Kelembapan rendah. Di bawah batas minimal (${settings.kelembapan_min}%). Naikkan kelembapan.`;
+    function createChart() {
+        const ctx = document.getElementById('sensorChart').getContext('2d');
+        const p = getChartPalette();
+        sensorChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    { label: 'Suhu (°C)', data: [], yAxisID: 'y', borderColor: '#f97316', backgroundColor: 'rgba(249,115,22,0.10)', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: true },
+                    { label: 'Kelembapan (%)', data: [], yAxisID: 'y', borderColor: '#38bdf8', backgroundColor: 'rgba(56,189,248,0.08)', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: true },
+                    { label: 'Angin (m/s)', data: [], yAxisID: 'y', borderColor: '#a78bfa', backgroundColor: 'rgba(167,139,250,0.08)', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false },
+                    { label: 'CO₂ (ppm)', data: [], yAxisID: 'y1', borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.08)', borderWidth: 2, borderDash: [4, 3], pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    legend: {
+                        position: 'top',
+                        align: 'start',
+                        labels: { color: p.legend, usePointStyle: true, boxWidth: 8, padding: 16, font: { family: 'Plus Jakarta Sans', size: 12, weight: 600 } }
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: { color: p.grid },
+                        ticks: { color: p.tick, maxTicksLimit: 8, font: { family: 'JetBrains Mono', size: 11 } }
+                    },
+                    y: {
+                        type: 'linear',
+                        position: 'left',
+                        grid: { color: p.grid },
+                        ticks: { color: p.tick, font: { family: 'JetBrains Mono', size: 11 } }
+                    },
+                    y1: {
+                        type: 'linear',
+                        position: 'right',
+                        grid: { drawOnChartArea: false },
+                        ticks: { color: '#10b981', font: { family: 'JetBrains Mono', size: 11 } }
+                    }
                 }
             }
-        
-            // Wind Speed
-            if (data.wind_speed > settings.wind_speed_max) {
-                const change = calculateChange(lastSensorValues.wind_speed, data.wind_speed);
-                if (settings.sensitivity === 'sensitif' || change >= settings.delta_threshold) {
-                    newAlerts.windHigh = `⚠️ Angin kencang. Melebihi batas maksimal (${settings.wind_speed_max}m/s).`;
-                }
-            } else if (data.wind_speed < settings.wind_speed_min) {
-                const change = calculateChange(lastSensorValues.wind_speed, data.wind_speed);
-                if (settings.sensitivity === 'sensitif' || change >= settings.delta_threshold) {
-                    newAlerts.windLow = `⚠️ Angin lemah. Di bawah batas minimal (${settings.wind_speed_min}m/s).`;
-                }
-            }
-        
-            // Air Quality
-            if (data.air_quality > settings.air_quality_max) {
-                const change = calculateChange(lastSensorValues.air_quality, data.air_quality);
-                if (settings.sensitivity === 'sensitif' || change >= settings.delta_threshold) {
-                    newAlerts.airPoor = `⚠️ Kualitas udara buruk. Melebihi batas maksimal (${settings.air_quality_max}ppm). Buka jendela untuk sikulasi udara.`;
-                }
-            }
-                // Hapus alert yang sudah tidak relevan
-                if (data.temperature <= settings.suhu_max) delete activeAlerts.tempHigh;
-                if (data.temperature >= settings.suhu_min) delete activeAlerts.tempLow;
-                
-                if (data.humidity <= settings.kelembapan_max) delete activeAlerts.humidHigh;
-                if (data.humidity >= settings.kelembapan_min) delete activeAlerts.humidLow;
-                
-                if (data.wind_speed <= settings.wind_speed_max) delete activeAlerts.windHigh;
-                if (data.wind_speed >= settings.wind_speed_min) delete activeAlerts.windLow;
-                
-                if (data.air_quality <= settings.air_quality_max) delete activeAlerts.airPoor;
-                
-            // Update nilai terakhir
-            lastSensorValues = {...data};
-        
-            // Skip jika dalam cooldown
-            if (alertCooldown) {
-                console.log("Alert dalam masa cooldown");
-                return;
-            }
-        
-            // Tampilkan alert jika ada
-            if (Object.keys(newAlerts).length > 0) {
-                updateAlerts(newAlerts);
-                
-                // Set cooldown
-                alertCooldown = true;
-                setTimeout(() => {
-                    alertCooldown = false;
-                    console.log("Cooldown selesai");
-                }, COOLDOWN_DURATION);
-            }
+        });
+    }
+
+    window.addEventListener('thermal:themechange', function() {
+        if (!sensorChart) return;
+        const p = getChartPalette();
+        sensorChart.options.plugins.legend.labels.color = p.legend;
+        sensorChart.options.scales.x.grid.color = p.grid;
+        sensorChart.options.scales.x.ticks.color = p.tick;
+        sensorChart.options.scales.y.grid.color = p.grid;
+        sensorChart.options.scales.y.ticks.color = p.tick;
+        sensorChart.update('none');
+    });
+
+    function setBadge(id, label, type) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.textContent = label;
+        el.className = 'badge-pill ' + (type === 'optimal' ? 'badge-optimal' : type === 'warning' ? 'badge-warning' : 'badge-critical');
+    }
+
+    function updateComfortSummary(d) {
+        let score = 100;
+        const issues = [];
+        const recs = [];
+
+        // Temperature evaluation
+        if (d.temperature > CONFIG.suhuMax) {
+            score -= Math.min(35, Math.round((d.temperature - CONFIG.suhuMax) * 10 + 15));
+            setBadge('status-temp', 'Tinggi', 'critical');
+            issues.push(`Suhu ${d.temperature}°C melebihi batas maksimal (${CONFIG.suhuMax}°C).`);
+            recs.push('Turunkan suhu AC ke kisaran 25–26°C atau aktifkan kipas sirkulasi.');
+        } else if (d.temperature < CONFIG.suhuMin) {
+            score -= Math.min(25, Math.round((CONFIG.suhuMin - d.temperature) * 8 + 10));
+            setBadge('status-temp', 'Rendah', 'warning');
+            issues.push(`Suhu ${d.temperature}°C di bawah batas minimal (${CONFIG.suhuMin}°C).`);
+            recs.push('Naikkan setelan suhu AC agar lebih hemat energi dan nyaman.');
+        } else {
+            setBadge('status-temp', 'Optimal', 'optimal');
         }
 
-        // Fungsi untuk menangani alert
-        function updateAlerts(newAlerts) {
-            // Gabungkan alert baru dengan yang sudah ada
-            const allAlerts = {...activeAlerts, ...newAlerts};
-            
-            // Tampilkan semua alert
-            if (Object.keys(allAlerts).length > 0) {
-                const alertMessages = Object.values(allAlerts).join('<br>');
-                document.getElementById("alertMessage").innerHTML = alertMessages;
-                document.getElementById("stickyMessage").innerHTML = alertMessages;
-                
-                // Tampilkan modal dan sticky alert
-                document.getElementById("alertModal").classList.add('show');
-                document.getElementById("stickyAlert").style.display = "block";
+        // Humidity evaluation
+        if (d.humidity > CONFIG.humidMax) {
+            score -= 20;
+            setBadge('status-humid', 'Lembap', 'warning');
+            issues.push(`Kelembapan ${d.humidity}% melampaui batas (${CONFIG.humidMax}%).`);
+            recs.push('Gunakan mode Dry pada AC atau tingkatkan ventilasi silang.');
+        } else if (d.humidity < CONFIG.humidMin) {
+            score -= 15;
+            setBadge('status-humid', 'Kering', 'warning');
+            issues.push(`Kelembapan ${d.humidity}% di bawah batas (${CONFIG.humidMin}%).`);
+        } else {
+            setBadge('status-humid', 'Optimal', 'optimal');
+        }
+
+        // CO2 evaluation
+        if (d.air_quality > CONFIG.co2Max) {
+            score -= 30;
+            setBadge('status-co2', 'Buruk', 'critical');
+            issues.push(`CO₂ ${d.air_quality} ppm melebihi ambang aman (${CONFIG.co2Max} ppm).`);
+            recs.push('Buka jendela atau nyalakan exhaust fan untuk pasokan udara segar.');
+        } else {
+            setBadge('status-co2', 'Sehat', 'optimal');
+        }
+
+        // Wind speed evaluation
+        if (d.wind_speed > CONFIG.windMax) {
+            score -= 15;
+            setBadge('status-wind', 'Kencang', 'warning');
+        } else if (d.wind_speed < CONFIG.windMin) {
+            score -= 10;
+            setBadge('status-wind', 'Lemah', 'warning');
+        } else {
+            setBadge('status-wind', 'Optimal', 'optimal');
+        }
+
+        score = Math.max(0, Math.min(100, score));
+
+        // Update SVG radial gauge
+        const circumference = 301.59;
+        const offset = circumference - (score / 100) * circumference;
+        const ring = document.getElementById('comfortRing');
+        ring.style.strokeDashoffset = offset;
+        ring.style.stroke = score >= 80 ? 'var(--status-optimal)' : score >= 55 ? 'var(--status-warning)' : 'var(--status-critical)';
+        document.getElementById('comfortScore').textContent = score;
+
+        if (score >= 80) {
+            setBadge('comfortBadge', 'Nyaman', 'optimal');
+            document.getElementById('comfortTitle').textContent = 'Kondisi Ruangan Nyaman';
+            document.getElementById('comfortSubtitle').textContent = 'Parameter termal dan kualitas udara berada di zona ideal.';
+            document.getElementById('comfortRecommendation').textContent = 'Pertahankan sirkulasi udara saat ini. Tidak diperlukan penyesuaian pendingin ruangan.';
+        } else if (score >= 55) {
+            setBadge('comfortBadge', 'Perhatian', 'warning');
+            document.getElementById('comfortTitle').textContent = 'Perlu Penyesuaian Ringan';
+            document.getElementById('comfortSubtitle').textContent = 'Satu atau lebih parameter mulai menjauh dari zona target.';
+            document.getElementById('comfortRecommendation').textContent = recs[0] || 'Periksa ventilasi ruangan dan pengaturan pendingin.';
+        } else {
+            setBadge('comfortBadge', 'Tidak Nyaman', 'critical');
+            document.getElementById('comfortTitle').textContent = 'Kondisi Termal Kurang Ideal';
+            document.getElementById('comfortSubtitle').textContent = 'Beberapa parameter melewati batas kenyamanan yang ditetapkan.';
+            document.getElementById('comfortRecommendation').textContent = recs.join(' ') || 'Segera lakukan penyesuaian suhu dan sirkulasi udara.';
+        }
+
+        // Progress bars
+        document.getElementById('bar-temp').style.width = Math.min(100, Math.max(5, ((d.temperature - 15) / 30) * 100)) + '%';
+        document.getElementById('bar-humid').style.width = Math.min(100, Math.max(5, d.humidity)) + '%';
+        document.getElementById('bar-co2').style.width = Math.min(100, Math.max(5, (d.air_quality / Math.max(600, CONFIG.co2Max * 1.4)) * 100)) + '%';
+        document.getElementById('bar-wind').style.width = Math.min(100, Math.max(5, (d.wind_speed / Math.max(6, CONFIG.windMax * 1.4)) * 100)) + '%';
+
+        // Live alert banner
+        const banner = document.getElementById('liveAlertBanner');
+        if (issues.length > 0 && !alertDismissed) {
+            document.getElementById('liveAlertText').innerHTML = issues.map(i => `<div>• ${i}</div>`).join('');
+            banner.style.display = 'flex';
+        } else if (issues.length === 0) {
+            banner.style.display = 'none';
+            alertDismissed = false;
+        }
+    }
+
+    async function fetchRealtimeData() {
+        try {
+            const res = await fetch('get_data.php?timeframe=realtime');
+            if (!res.ok) return;
+            const json = await res.json();
+            if (json.data && json.data.length > 0) {
+                const latest = json.data[0];
+                document.getElementById('temperature').textContent = Number(latest.temperature).toFixed(1);
+                document.getElementById('humidity').textContent = Number(latest.humidity).toFixed(1);
+                document.getElementById('CO2').textContent = Math.round(Number(latest.air_quality));
+                document.getElementById('wind_speed').textContent = Number(latest.wind_speed).toFixed(1);
+
+                const dt = new Date(latest.reading_time.replace(' ', 'T'));
+                document.getElementById('lastUpdatedAt').textContent = isNaN(dt) ? latest.reading_time : dt.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                updateComfortSummary(latest);
             }
-            
-            // Simpan alert aktif
-            activeAlerts = allAlerts;
+        } catch (err) {
+            console.error('Realtime fetch error:', err);
         }
+    }
 
-        function showAlert(type, message) {
-            // Gabungkan semua pesan dari activeAlerts
-            const alertMessages = Object.values(activeAlerts).join('<br>'); // Gabungkan pesan dengan <br> untuk format yang sama
-            document.getElementById("alertMessage").innerHTML = alertMessages; // Tampilkan semua pesan di modal
-            document.getElementById("alertModal").classList.add('show'); // Tampilkan modal
-        }
+    async function fetchSensorData() {
+        const loader = document.getElementById('chartLoading');
+        try {
+            const res = await fetch(`get_data.php?timeframe=${encodeURIComponent(currentTimeframe)}`);
+            if (!res.ok) return;
+            const json = await res.json();
+            const rows = (json.data || []).slice().reverse();
 
-        function moveAlertToBottom() {
-            // Tutup modal
-            document.getElementById("alertModal").classList.remove('show');
-
-            // Tampilkan sticky alert setelah modal ditutup
-            updateStickyAlert();
-        }
-
-        function updateStickyAlert() {
-            const stickyAlert = document.getElementById("stickyAlert");
-            const stickyMessage = document.getElementById("stickyMessage");
-
-            if (Object.keys(activeAlerts).length > 0) {
-                // Gabungkan semua pesan dari activeAlerts
-                stickyMessage.innerHTML = Object.values(activeAlerts).join('<br>');
-                stickyAlert.style.display = "block"; // Tampilkan sticky alert
-                stickyAlert.style.animation = "slideDown 0.5s ease-in-out";
-            } else {
-                // Sembunyikan sticky alert jika tidak ada pesan
-                stickyAlert.style.animation = "slideUp 0.5s ease-in-out";
-                setTimeout(() => {
-                    stickyAlert.style.display = "none";
-                }, 500);
-            }
-        }
-
-        function setTimeframe(element, timeframe) {
-            currentTimeframe = timeframe;
-        
-            // Hapus kelas 'active' dari semua tombol
-            document.querySelectorAll('.timeframe-card').forEach(card => {
-                card.classList.remove('active');
+            const labels = rows.map(entry => {
+                const date = new Date(entry.reading_time.replace(' ', 'T'));
+                if (isNaN(date)) return entry.reading_time;
+                if (currentTimeframe === 'latest' || currentTimeframe === 'daily') {
+                    return date.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+                }
+                if (currentTimeframe === 'weekly' || currentTimeframe === 'monthly') {
+                    return date.toLocaleDateString('id-ID', { day: '2-digit', month: 'short' });
+                }
+                return date.toLocaleDateString('id-ID', { month: 'short', year: 'numeric' });
             });
-        
-            // Tambahkan kelas 'active' ke tombol yang diklik
-            element.classList.add('active');
-        
-            // Panggil fungsi untuk ambil data
-            fetchSensorData();
+
+            sensorChart.data.labels = labels;
+            sensorChart.data.datasets[0].data = rows.map(e => e.temperature);
+            sensorChart.data.datasets[1].data = rows.map(e => e.humidity);
+            sensorChart.data.datasets[2].data = rows.map(e => e.wind_speed);
+            sensorChart.data.datasets[3].data = rows.map(e => e.air_quality);
+            sensorChart.update();
+
+            if (loader) {
+                loader.style.display = rows.length === 0 ? 'block' : 'none';
+                if (rows.length === 0) loader.textContent = 'Belum ada data sensor untuk rentang waktu ini.';
+            }
+        } catch (err) {
+            console.error('Chart fetch error:', err);
+            if (loader) loader.textContent = 'Gagal memuat data grafik.';
         }
+    }
 
-        document.getElementById("menuToggle").addEventListener("click", function() {
-            document.getElementById("sidebar").classList.toggle("active");
-            document.getElementById("overlay").classList.toggle("active");
+    document.querySelectorAll('.segmented-btn[data-tf]').forEach(btn => {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('.segmented-btn[data-tf]').forEach(b => b.classList.remove('is-active'));
+            this.classList.add('is-active');
+            currentTimeframe = this.dataset.tf;
+            fetchSensorData();
         });
+    });
 
-        document.getElementById("overlay").addEventListener("click", function() {
-            document.getElementById("sidebar").classList.remove("active");
-            document.getElementById("overlay").classList.remove("active");
-        });
-
-        // Single event listener for profile dropdown
-        const profileBtn = document.getElementById("profileBtn");
-        const profileDropdown = document.getElementById("profileDropdown");
-        const dropdownArrow = document.getElementById("dropdownArrow");
-
-        profileBtn.addEventListener("click", function(e) {
-            e.stopPropagation();
-            const isActive = profileDropdown.classList.toggle("active");
-            dropdownArrow.classList.toggle("rotate-180");
-        });
-
-        // Close dropdown when clicking outside
-        document.addEventListener("click", function() {
-            profileDropdown.classList.remove("active");
-            dropdownArrow.classList.remove("rotate-180");
-        });
-
-        // Prevent dropdown from closing when clicking inside it
-        profileDropdown.addEventListener("click", function(e) {
-            e.stopPropagation();
-        });
-    </script>
-
-<!-- Footer -->
-<footer class="text-gray-500 text-center py-4 mt-10">
-    <div class="container mx-auto px-4">
-        <p class="text-sm">
-            &copy; <?php echo date('Y'); ?> Monitoring Kenyamanan Termal. All rights reserved.
-        </p>
-        <p class="text-xs mt-2">
-            Dibuat dengan ❤️ oleh
-            <a href="https://www.linkedin.com/in/desi-armanda-sari" target="_blank"
-               class="text-blue-400 hover:text-blue-500 underline transition-all duration-300">
-                Desi Armanda Sari
-            </a>.
-        </p>
-        <p class="text-xs mt-2 italic text-gray-400">
-            "Kalau ada bug, itu fitur tersembunyi.
-            Kalau lancar, itu keajaiban mahasiswa tingkat akhir." 😄
-        </p>
-    </div>
-</footer>
-
+    createChart();
+    fetchRealtimeData();
+    fetchSensorData();
+    setInterval(fetchRealtimeData, CONFIG.intervalMs);
+    setInterval(fetchSensorData, Math.max(15000, CONFIG.intervalMs * 3));
+})();
+</script>
 </body>
 </html>

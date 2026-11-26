@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS users (
     is_verified TINYINT(1) DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     apikey VARCHAR(255) DEFAULT NULL,
-    remember_token VARCHAR(255) DEFAULT NULL
+    remember_token VARCHAR(255) DEFAULT NULL,
+    verification_token VARCHAR(64) DEFAULT NULL,
+    token_expiry DATETIME DEFAULT NULL
 );
 
 -- Sensor readings table

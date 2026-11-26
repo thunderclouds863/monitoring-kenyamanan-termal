@@ -1,408 +1,283 @@
 <?php
-session_start();
 include 'db.php';
-require 'vendor/autoload.php'; // Include Composer's autoloader
+require_once 'includes/auth_bootstrap.php';
+if (is_file(__DIR__ . '/vendor/composer/autoload_real.php')) {
+    require_once __DIR__ . '/vendor/autoload.php';
+}
+
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
 
-// Initialize variables
 $error = '';
-$message = '';
+$success = '';
 
-// Check if email is set in session
-if (!isset($_SESSION['email'])) {
+if (empty($_SESSION['email'])) {
     header("Location: register.php");
     exit;
 }
 
-$email = $_SESSION['email']; // Initialize email from session
+$email = $_SESSION['email'];
 
-// Set default message if not already set
 if (!isset($_SESSION['otp_message'])) {
-    $_SESSION['otp_message'] = 'OTP has been sent to your email. It will expire in 2 minutes.';
+    $_SESSION['otp_message'] = 'Kode OTP telah dikirim ke email Anda. Berlaku selama 2 menit.';
 }
 
-// Update message if resend OTP is triggered
-if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['resend_otp'])) {
-    // Generate new OTP
-    $new_otp = strval(rand(100000, 999999));
-    $_SESSION['otp'] = $new_otp;
-    $_SESSION['otp_expiry'] = time() + 120; // Reset expiry time to 120 seconds
-
-    // Update OTP in database
-    $sql_update = "UPDATE users SET otp='$new_otp' WHERE email='$email'";
-    if ($conn->query($sql_update)) {
-        // Send email with new OTP
-        if (sendEmail($email, "Your new OTP code is: <b>$new_otp</b>", "New Verification OTP")) {
-            echo json_encode(['success' => true]);
-        } else {
-            echo json_encode(['success' => false, 'message' => "Failed to resend OTP. Please try again."]);
-        }
-    } else {
-        echo json_encode(['success' => false, 'message' => "Failed to update OTP in database."]);
+function sendOtpEmail(string $email, string $body, string $subject): bool {
+    $gmailPass = getenv('GMAIL_APP_PASSWORD');
+    if (empty($gmailPass) || !class_exists(PHPMailer::class)) {
+        return false;
     }
-    exit; // Stop further execution for AJAX response
-}
-
-// Retrieve the message from the session
-$message = $_SESSION['otp_message'];
-
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    if (isset($_POST['verify_otp'])) {
-        $entered_otp = implode('', $_POST['otp']);
-
-        // Initialize session for tracking OTP attempts
-        if (!isset($_SESSION['otp_attempts'])) {
-            $_SESSION['otp_attempts'] = 0;
-        }
-
-        // Check if OTP exists in database
-        $sql = "SELECT * FROM users WHERE email='$email' AND is_verified=0";
-        $result = $conn->query($sql);
-
-        if ($result->num_rows == 1) {
-            $user = $result->fetch_assoc();
-
-            // Check if OTP matches
-            if ($user['otp'] === $entered_otp) {
-                // Reset session attempts and verify the user
-                $_SESSION['otp_attempts'] = 0;
-                $sql_update = "UPDATE users SET is_verified=1, otp=NULL WHERE email='$email'";
-                if ($conn->query($sql_update)) {
-                    // Kirim email notifikasi bahwa akun berhasil diverifikasi
-                    $emailSubject = "Account Verified Successfully";
-                    $emailBody = "Dear " . htmlspecialchars($user['username']) . ",<br><br>Your account has been successfully verified. You can now log in to your account.<br><br>Thank you for verifying your email.<br><br>Best regards,<br>Sistem Informasi Kenyamanan Termal";
-
-                    if (sendEmail($email, $emailBody, $emailSubject)) {
-                        error_log("Verification email sent to $email.");
-                    } else {
-                        error_log("Failed to send verification email to $email.");
-                    }
-
-                    $message = "Account successfully verified. Redirecting to login page...";
-                    unset($_SESSION['email']);
-                    header("Refresh: 3; url=login.php");
-                    exit;
-                } else {
-                    $error = "Error verifying account. Please try again.";
-                }
-            } else {
-                // Increment OTP attempts in session
-                $_SESSION['otp_attempts']++;
-
-                if ($_SESSION['otp_attempts'] >= 3) {
-                    // Delete the account if attempts exceed 3
-                    $sql_delete = "DELETE FROM users WHERE email='$email'";
-                    $conn->query($sql_delete);
-
-                    // Redirect to register page with error message
-                    unset($_SESSION['email']);
-                    unset($_SESSION['otp_attempts']);
-                    $_SESSION['error'] = "You have exceeded the maximum number of OTP attempts. Please register again.";
-                    header("Location: register.php");
-                    exit;
-                } else {
-                    $remaining_attempts = 3 - $_SESSION['otp_attempts'];
-                    $error = "Invalid OTP! You have $remaining_attempts attempts remaining.";
-                }
-            }
-        } else {
-            $error = "Invalid OTP or OTP has expired!";
-        }
-    }
-    elseif (isset($_POST['resend_otp'])) {
-        // Generate new OTP
-        $new_otp = strval(rand(100000, 999999));
-        $_SESSION['otp'] = $new_otp;
-        $_SESSION['otp_expiry'] = time() + 120; // Reset expiry time to 120 seconds
-
-        // Update OTP in database
-        $sql_update = "UPDATE users SET otp='$new_otp' WHERE email='$email'";
-        if ($conn->query($sql_update)) {
-            // Send email with new OTP
-            if (sendEmail($email, "Your new OTP code is: <b>$new_otp</b>", "New Verification OTP")) {
-                echo json_encode([
-                    'success' => true,
-                    'message' => "A new OTP has been sent to your email. It will expire in 2 minutes.",
-                ]);
-            } else {
-                echo json_encode([
-                    'success' => false,
-                    'message' => "Failed to resend OTP. Please try again.",
-                ]);
-            }
-        } else {
-            echo json_encode([
-                'success' => false,
-                'message' => "Failed to update OTP in database.",
-            ]);
-        }
-        exit; // Stop further execution for AJAX response
-    }
-}
-
-function sendEmail($email, $body, $subject = "Notification") {
     $mail = new PHPMailer(true);
-
     try {
-        error_log("sendEmail function called for email: $email"); // Debugging log
-        // Server settings
         $mail->isSMTP();
         $mail->Host = 'smtp.gmail.com';
         $mail->SMTPAuth = true;
         $mail->Username = 'si.kenyamanantermal@gmail.com';
-        $mail->Password = getenv('GMAIL_APP_PASSWORD');
+        $mail->Password = $gmailPass;
         $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
         $mail->Port = 587;
+        $mail->Timeout = 10;
 
-        // Recipients
-        $mail->setFrom('si.kenyamanantermal@gmail.com', 'Account Verification');
+        $mail->setFrom('si.kenyamanantermal@gmail.com', 'Monitoring Kenyamanan Termal');
         $mail->addAddress($email);
-
-        // Content
         $mail->isHTML(true);
         $mail->Subject = $subject;
-        $mail->Body = nl2br($body);
+        $mail->Body = $body;
 
-        error_log("Attempting to send OTP email...");
         $mail->send();
-        error_log("OTP email sent successfully.");
         return true;
     } catch (Exception $e) {
-        error_log("Mailer Error: " . $mail->ErrorInfo);
+        error_log("OTP Mailer Error: " . $e->getMessage());
         return false;
     }
 }
+
+// AJAX Resend OTP
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['resend_otp'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    $new_otp = strval(random_int(100000, 999999));
+    $_SESSION['otp_expiry'] = time() + 120;
+    $_SESSION['otp_attempts'] = 0;
+
+    $stmt = $conn->prepare("UPDATE users SET otp = ? WHERE email = ? AND is_verified = 0");
+    $stmt->bind_param("ss", $new_otp, $email);
+    if ($stmt->execute()) {
+        $stmt->close();
+        $sent = sendOtpEmail($email, "Kode OTP baru Anda adalah: <b>$new_otp</b>", "Kode OTP Verifikasi Baru");
+        if ($sent) {
+            unset($_SESSION['demo_otp_preview']);
+            echo json_encode(['success' => true, 'message' => 'Kode OTP baru telah dikirim ke email Anda.']);
+        } else {
+            $_SESSION['demo_otp_preview'] = $new_otp;
+            echo json_encode(['success' => true, 'message' => 'Mode lokal/demo: kode OTP baru telah dibuat.', 'demo_otp' => $new_otp]);
+        }
+    } else {
+        $stmt->close();
+        echo json_encode(['success' => false, 'message' => 'Gagal memperbarui kode OTP.']);
+    }
+    exit;
+}
+
+// Verify OTP
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['verify_otp'])) {
+    $otpArray = isset($_POST['otp']) && is_array($_POST['otp']) ? $_POST['otp'] : [];
+    $entered_otp = preg_replace('/\D/', '', implode('', $otpArray));
+
+    if (!isset($_SESSION['otp_attempts'])) {
+        $_SESSION['otp_attempts'] = 0;
+    }
+
+    if (isset($_SESSION['otp_expiry']) && time() > $_SESSION['otp_expiry']) {
+        $error = "Kode OTP telah kedaluwarsa. Silakan kirim ulang kode baru.";
+    } else {
+        $stmt = $conn->prepare("SELECT id, username, otp FROM users WHERE email = ? AND is_verified = 0 LIMIT 1");
+        $stmt->bind_param("s", $email);
+        $stmt->execute();
+        $res = $stmt->get_result();
+
+        if ($res && $res->num_rows === 1) {
+            $user = $res->fetch_assoc();
+            $stmt->close();
+
+            if ($user['otp'] !== null && hash_equals((string)$user['otp'], $entered_otp)) {
+                $upd = $conn->prepare("UPDATE users SET is_verified = 1, otp = NULL WHERE id = ?");
+                $upd->bind_param("i", $user['id']);
+                if ($upd->execute()) {
+                    $upd->close();
+                    unset($_SESSION['email'], $_SESSION['otp_attempts'], $_SESSION['otp_message'], $_SESSION['demo_otp_preview'], $_SESSION['otp_expiry']);
+                    header("Location: login.php?verified=true");
+                    exit;
+                }
+                $upd->close();
+                $error = "Gagal memverifikasi akun. Silakan coba lagi.";
+            } else {
+                $_SESSION['otp_attempts']++;
+                if ($_SESSION['otp_attempts'] >= 3) {
+                    $del = $conn->prepare("DELETE FROM users WHERE email = ? AND is_verified = 0");
+                    $del->bind_param("s", $email);
+                    $del->execute();
+                    $del->close();
+
+                    unset($_SESSION['email'], $_SESSION['otp_attempts'], $_SESSION['otp_message'], $_SESSION['demo_otp_preview']);
+                    $_SESSION['error'] = "Batas percobaan OTP terlampaui. Silakan daftar kembali.";
+                    header("Location: register.php");
+                    exit;
+                } else {
+                    $remaining = 3 - $_SESSION['otp_attempts'];
+                    $error = "Kode OTP salah. Sisa percobaan: $remaining kali.";
+                }
+            }
+        } else {
+            $stmt->close();
+            $error = "Akun tidak ditemukan atau sudah diverifikasi.";
+        }
+    }
+}
+
+$message = $_SESSION['otp_message'];
+$demoOtp = $_SESSION['demo_otp_preview'] ?? null;
+$remainingSeconds = isset($_SESSION['otp_expiry']) ? max(0, $_SESSION['otp_expiry'] - time()) : 120;
 ?>
 <!DOCTYPE html>
-<html lang="en">
+<html lang="id">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Account Verification</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap');
-
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: 'Poppins', sans-serif;
-        }
-
-        body {
-            height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            background: linear-gradient(50deg, #0D1B2A, #243B55);
-        }
-
-        .container {
-            width: 100%;
-            max-width: 400px;
-            background: rgba(255, 255, 255, 0.1);
-            backdrop-filter: blur(10px);
-            padding: 40px;
-            border-radius: 15px;
-            box-shadow: 0px 0px 15px rgba(255, 255, 255, 0.2);
-            text-align: center;
-        }
-
-        h2 {
-            font-size: 22px;
-            font-weight: bold;
-            color: white;
-            margin-bottom: 20px;
-        }
-
-        form {
-            display: flex;
-            flex-direction: column;
-        }
-
-        input {
-            width: 100%;
-            background: transparent;
-            border: none;
-            border-bottom: 2px solid #B0C4DE;
-            color: white;
-            font-size: 16px;
-            outline: none;
-            margin-bottom: 20px;
-        }
-
-        button {
-            width: 100%;
-            padding: 12px;
-            background: linear-gradient(50deg, rgb(21, 36, 58), #E0E1DD);
-            border: none;
-            border-radius: 8px;
-            color: black;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            margin-bottom: 10px;
-            transition: all 0.2s;
-        }
-
-        button:hover {
-            transform: scale(1.02);
-        }
-
-        .message {
-            color: #B0C4DE;
-            margin-bottom: 20px;
-        }
-
-        .error {
-            color: #FF6B6B;
-            margin-bottom: 20px;
-        }
-
-        .timer {
-            color: #FF6B6B;
-            margin-bottom: 15px;
-            font-size: 14px;
-        }
-
-        .otp-input-container {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 20px;
-        }
-
-        .otp-underline-input {
-            width: 40px;
-            height: 40px;
-            text-align: center;
-            font-size: 18px;
-            border: none;
-            border-bottom: 2px solid #B0C4DE; /* Garis bawah */
-            background: transparent;
-            color: white;
-            outline: none;
-            margin: 0 5px; /* Jarak antar input */
-        }
-
-        .otp-underline-input:focus {
-            border-bottom-color: #E0E1DD; /* Warna garis bawah saat fokus */
-        }
-
-        .otp-underline-input::-webkit-inner-spin-button,
-        .otp-underline-input::-webkit-outer-spin-button {
-            -webkit-appearance: none;
-            margin: 0;
-        }
-
-        button[name="resendOtpButton"]:hover {
-            text-decoration: underline !important; /* Menambahkan garis bawah saat hover */
-            color: #E0E1DD; /* Ubah warna teks saat hover */
-        }
-    </style>
+    <title>Verifikasi Akun — Monitoring Kenyamanan Termal</title>
+    <link rel="icon" type="image/png" href="logo.png">
+    <?php render_theme_init_script(); ?>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="assets/css/design-system.css">
 </head>
 <body>
-<div class="container">
-    <h2>Account Verification</h2>
-    <!-- Message indicating OTP has been sent -->
-    <p class="message" id="otpSentMessage"><?php echo htmlspecialchars($message); ?></p>
-    <?php if (!empty($error)): ?>
-        <p class="error"><?php echo htmlspecialchars($error); ?></p>
-    <?php endif; ?>
-
-    <!-- OTP Verification Form -->
-    <form method="POST" id="otpForm">
-        <div class="otp-input-container">
-            <input type="text" name="otp[]" maxlength="1" class="otp-underline-input" oninput="moveToNext(this)">
-            <input type="text" name="otp[]" maxlength="1" class="otp-underline-input" oninput="moveToNext(this)">
-            <input type="text" name="otp[]" maxlength="1" class="otp-underline-input" oninput="moveToNext(this)">
-            <input type="text" name="otp[]" maxlength="1" class="otp-underline-input" oninput="moveToNext(this)">
-            <input type="text" name="otp[]" maxlength="1" class="otp-underline-input" oninput="moveToNext(this)">
-            <input type="text" name="otp[]" maxlength="1" class="otp-underline-input" oninput="moveToNext(this)">
+<div class="auth-page">
+    <section class="auth-visual-panel">
+        <div class="auth-brand">
+            <img src="logo.png" alt="Logo Monitoring Kenyamanan Termal" class="auth-brand-logo">
+            <div class="auth-brand-text">
+                <span class="auth-brand-name">ThermoMonitor</span>
+                <span class="auth-brand-sub">Verifikasi Keamanan Akun</span>
+            </div>
         </div>
-        <div class="timer" id="otpTimer">OTP expires in: 120 seconds</div>
-        <button type="submit" name="verify_otp">Verify OTP</button>
-    </form>
-    <form method="POST" style="margin-top: 10px;">
-        <button type="button" id="resendOtpButton" name="resendOtpButton" style="background: transparent; border: none; color: #B0C4DE; text-decoration: none; font-size: 14px; cursor: pointer;">
-            Resend OTP
-        </button>
-        <!-- Loading spinner -->
-        <span id="loadingSpinner" style="display: none; margin-left: 10px; color: #B0C4DE; font-size: 14px;">Sending...</span>
-    </form>
+        <div class="auth-artwork-wrap">
+            <img src="assets/svg/auth-illustration.svg" alt="Ilustrasi sensor kenyamanan termal ruangan" class="auth-artwork-img">
+        </div>
+        <div class="auth-visual-footer">
+            <p class="auth-visual-caption">Verifikasi email memastikan notifikasi peringatan sensor terkirim ke alamat yang tepat.</p>
+            <span class="status-pill-live"><span class="status-dot"></span>Verifikasi OTP</span>
+        </div>
+    </section>
+
+    <main class="auth-form-panel">
+        <div class="auth-form-card">
+            <h1 class="auth-heading">Verifikasi Kode OTP</h1>
+            <p class="auth-subheading" id="otpSentMessage"><?= htmlspecialchars($message) ?></p>
+
+            <?php if ($demoOtp): ?>
+                <div class="alert-banner is-warning" id="demoOtpBox">
+                    <i class="fas fa-flask" style="margin-top: 2px;"></i>
+                    <div>Kode OTP Demo: <strong class="mono" id="demoOtpCode" style="font-size: 16px; letter-spacing: 0.12em;"><?= htmlspecialchars($demoOtp) ?></strong></div>
+                </div>
+            <?php endif; ?>
+
+            <?php if (!empty($error)): ?>
+                <div class="alert-banner is-error" role="alert">
+                    <i class="fas fa-circle-exclamation" style="margin-top: 2px;"></i>
+                    <div><?= htmlspecialchars($error) ?></div>
+                </div>
+            <?php endif; ?>
+
+            <form method="POST" id="otpForm">
+                <label class="form-label">Masukkan 6 digit kode untuk <strong><?= htmlspecialchars($email) ?></strong></label>
+                <div class="otp-grid">
+                    <?php for ($i = 0; $i < 6; $i++): ?>
+                        <input type="text" name="otp[]" maxlength="1" inputmode="numeric" pattern="[0-9]" class="otp-box" autocomplete="one-time-code" required>
+                    <?php endfor; ?>
+                </div>
+
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; font-size: 13px;">
+                    <span style="color: var(--text-secondary);" id="otpTimer">Berlaku: <strong class="mono"><?= $remainingSeconds ?>d</strong></span>
+                    <button type="button" id="resendOtpButton" style="background: none; border: none; color: var(--brand-primary); font-weight: 600; cursor: pointer; font-size: 13px;">
+                        Kirim ulang OTP
+                    </button>
+                </div>
+
+                <button type="submit" name="verify_otp" class="btn-ds btn-ds-primary" style="width: 100%;">
+                    <i class="fas fa-shield-check"></i>
+                    <span>Verifikasi Akun</span>
+                </button>
+            </form>
+
+            <p style="text-align: center; margin-top: 22px; font-size: 13.5px; color: var(--text-secondary);">
+                <a href="register.php"><i class="fas fa-arrow-left" style="margin-right: 5px;"></i>Kembali ke pendaftaran</a>
+            </p>
+        </div>
+    </main>
 </div>
+
 <script>
-    // OTP countdown timer
-    let timeLeft = 120;
-    const timerElement = document.getElementById('otpTimer');
-
-    const countdown = setInterval(() => {
-        timeLeft--;
-        timerElement.textContent = `OTP expires in: ${timeLeft} seconds`;
-
-        if (timeLeft <= 0) {
-            clearInterval(countdown);
-            timerElement.textContent = "OTP has expired!";
-            timerElement.style.color = "#FF6B6B";
-        }
-    }, 1000);
-
-    // Move to next input field
-    function moveToNext(current) {
-        if (current.value.length === 1) {
-            const nextInput = current.nextElementSibling;
-            if (nextInput && nextInput.classList.contains('otp-underline-input')) {
-                nextInput.focus();
+(function() {
+    const boxes = Array.from(document.querySelectorAll('.otp-box'));
+    boxes.forEach((box, idx) => {
+        box.addEventListener('input', () => {
+            box.value = box.value.replace(/\D/g, '').slice(0, 1);
+            if (box.value && boxes[idx + 1]) boxes[idx + 1].focus();
+        });
+        box.addEventListener('keydown', (e) => {
+            if (e.key === 'Backspace' && !box.value && boxes[idx - 1]) {
+                boxes[idx - 1].focus();
             }
-        }
-    }
-
-    const resendOtpButton = document.getElementById('resendOtpButton');
-    const loadingSpinner = document.getElementById('loadingSpinner');
-    const notificationMessage = document.getElementById('otpSentMessage');
-
-    resendOtpButton.addEventListener('click', function (e) {
-        e.preventDefault(); // Prevent default button behavior
-
-        // Show loading spinner
-        loadingSpinner.style.display = 'inline';
-        resendOtpButton.disabled = true; // Disable the button to prevent multiple clicks
-
-        fetch('verify_otp.php', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: 'resend_otp=true'
-        })
-        .then(response => response.json())
-        .then(data => {
-            // Hide loading spinner
-            loadingSpinner.style.display = 'none';
-            resendOtpButton.disabled = false; // Re-enable the button
-
-            if (data.success) {
-                // Update the notification message dynamically
-                notificationMessage.textContent = "A new OTP has been sent to your email. It will expire in 2 minutes.";
-                notificationMessage.style.color = "#B0C4DE";
-
-                // Reset the timer
-                timeLeft = 120;
-                timerElement.textContent = `OTP expires in: ${timeLeft} seconds`;
-                timerElement.style.color = "#FF6B6B";
-            } else {
-                alert(data.message);
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-
-            // Hide loading spinner and re-enable button in case of error
-            loadingSpinner.style.display = 'none';
-            resendOtpButton.disabled = false; // Re-enable the button
+        });
+        box.addEventListener('paste', (e) => {
+            e.preventDefault();
+            const digits = (e.clipboardData.getData('text') || '').replace(/\D/g, '').slice(0, 6);
+            digits.split('').forEach((d, i) => { if (boxes[i]) boxes[i].value = d; });
+            if (boxes[Math.min(digits.length, 5)]) boxes[Math.min(digits.length, 5)].focus();
         });
     });
+
+    let timeLeft = <?= (int)$remainingSeconds ?>;
+    const timerEl = document.getElementById('otpTimer');
+    const tick = setInterval(() => {
+        if (timeLeft <= 0) {
+            clearInterval(tick);
+            timerEl.innerHTML = '<span style="color: var(--status-critical);">Kode OTP kedaluwarsa</span>';
+            return;
+        }
+        timeLeft--;
+        timerEl.innerHTML = 'Berlaku: <strong class="mono">' + timeLeft + 'd</strong>';
+    }, 1000);
+
+    const resendBtn = document.getElementById('resendOtpButton');
+    if (resendBtn) {
+        resendBtn.addEventListener('click', function() {
+            resendBtn.disabled = true;
+            resendBtn.textContent = 'Mengirim...';
+            fetch('verify_otp.php', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'resend_otp=true'
+            })
+            .then(r => r.json())
+            .then(data => {
+                resendBtn.disabled = false;
+                resendBtn.textContent = 'Kirim ulang OTP';
+                if (data.success) {
+                    document.getElementById('otpSentMessage').textContent = data.message;
+                    timeLeft = 120;
+                    if (data.demo_otp) {
+                        const codeEl = document.getElementById('demoOtpCode');
+                        if (codeEl) codeEl.textContent = data.demo_otp;
+                    }
+                }
+            })
+            .catch(() => {
+                resendBtn.disabled = false;
+                resendBtn.textContent = 'Kirim ulang OTP';
+            });
+        });
+    }
+})();
 </script>
 </body>
 </html>
