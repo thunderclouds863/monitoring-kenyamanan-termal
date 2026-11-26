@@ -2,7 +2,7 @@
 -- Login: demo@demo.local / demo123
 INSERT INTO users (id, username, email, phone, password, is_verified) VALUES
 (1, 'demo', 'demo@demo.local', '081200000000', '$2y$10$52hboDnXS8GD5GyOOao2AO6mH7qI2M0ROpfd4EL8tO.W5hBADvWv6', 1);
-INSERT INTO settings (user_id) VALUES (1);
+-- Note: trigger after_user_insert automatically creates default settings row for user 1.
 
 SET SESSION max_recursive_iterations = 5000;
 -- 7 hari terakhir, tiap 10 menit, pola harian (siang lebih panas & kering)

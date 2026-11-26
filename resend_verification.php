@@ -1,76 +1,70 @@
 <?php
-use PHPMailer\PHPMailer\PHPMailer;
-use PHPMailer\PHPMailer\Exception;
-
-require 'vendor/autoload.php';
 include 'db.php';
+require_once 'includes/auth_bootstrap.php';
 
-if (isset($_GET['email'])) {
-    $email = $_GET['email'];
+if (!empty($_GET['email'])) {
+    $email = trim((string)$_GET['email']);
 
-    $sql = "SELECT * FROM users WHERE email='$email'";
-    $result = $conn->query($sql);
+    $stmt = $conn->prepare("SELECT id, is_verified FROM users WHERE email = ? LIMIT 1");
+    $stmt->bind_param("s", $email);
+    $stmt->execute();
+    $result = $stmt->get_result();
 
-    if ($result->num_rows == 1) {
+    if ($result && $result->num_rows === 1) {
         $user = $result->fetch_assoc();
+        $stmt->close();
 
-        if ($user['is_verified'] == 0) {
-            $verificationLink = "http://localhost/monitoring-kenyamanan-termal/verify_account.php?email=" . urlencode($email);
+        if ((int)$user['is_verified'] === 0) {
+            $otp = strval(random_int(100000, 999999));
+            $upd = $conn->prepare("UPDATE users SET otp = ? WHERE id = ?");
+            $upd->bind_param("si", $otp, $user['id']);
+            $upd->execute();
+            $upd->close();
 
-            $mail = new PHPMailer(true);
+            $_SESSION['email'] = $email;
+            $_SESSION['otp_expiry'] = time() + 120;
+            $_SESSION['otp_attempts'] = 0;
 
-            try {
-    $apiKey = getenv('BREVO_API_KEY');
-
-    $data = [
-        'sender' => [
-            'name' => 'Sistem Monitoring',
-            'email' => 'noreply@monitoring-kenyamanan-termal.my.id'
-        ],
-        'to' => [
-            ['email' => $email]
-        ],
-        'subject' => 'Verifikasi Akun Anda',
-        'htmlContent' => "<p>Klik link berikut untuk memverifikasi akun Anda:</p><p><a href='$verificationLink'>$verificationLink</a></p>",
-        'textContent' => "Klik link berikut untuk memverifikasi akun Anda: $verificationLink"
-    ];
-
-    $ch = curl_init('https://api.brevo.com/v3/smtp/email');
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'api-key: ' . $apiKey,
-        'Content-Type: application/json',
-        'accept: application/json'
-    ]);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
-
-    $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $error = curl_error($ch);
-    curl_close($ch);
-
-    if ($error) {
-        throw new Exception("cURL Error: $error");
-    }
-
-    if ($httpCode >= 200 && $httpCode < 300) {
-        // Redirect kembali ke login.php dengan pesan sukses
-        header("Location: login.php?verification_sent=true&email=" . urlencode($email));
-        exit;
-    } else {
-        throw new Exception("HTTP $httpCode: $response");
-    }
-} catch (Exception $e) {
-                echo "Gagal mengirim email. Error: {$mail->ErrorInfo}";
+            $apiKey = getenv('BREVO_API_KEY');
+            if (!empty($apiKey)) {
+                $data = [
+                    'sender' => [
+                        'name' => 'Monitoring Kenyamanan Termal',
+                        'email' => 'noreply@monitoring-kenyamanan-termal.my.id'
+                    ],
+                    'to' => [['email' => $email]],
+                    'subject' => 'Kode OTP Verifikasi Akun',
+                    'htmlContent' => "<p>Kode OTP verifikasi akun Anda adalah: <strong>$otp</strong> (berlaku 2 menit).</p>",
+                    'textContent' => "Kode OTP verifikasi akun Anda adalah: $otp (berlaku 2 menit)."
+                ];
+                $ch = curl_init('https://api.brevo.com/v3/smtp/email');
+                curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                    'api-key: ' . $apiKey,
+                    'Content-Type: application/json',
+                    'accept: application/json'
+                ]);
+                curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                curl_setopt($ch, CURLOPT_POST, true);
+                curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+                curl_exec($ch);
+                curl_close($ch);
+                $_SESSION['otp_message'] = 'Kode OTP verifikasi telah dikirim ulang ke email Anda.';
+            } else {
+                $_SESSION['otp_message'] = 'Mode lokal/demo (SMTP tidak dikonfigurasi). Gunakan kode OTP berikut untuk verifikasi.';
+                $_SESSION['demo_otp_preview'] = $otp;
             }
+
+            header("Location: verify_otp.php");
+            exit;
         } else {
-            echo "Akun sudah diverifikasi.";
+            header("Location: login.php?verified=true");
+            exit;
         }
-    } else {
-        echo "Email tidak ditemukan.";
     }
-} else {
-    echo "Email tidak valid.";
+    if ($stmt) {
+        $stmt->close();
+    }
 }
-?>
+
+header("Location: login.php");
+exit;

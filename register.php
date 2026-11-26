@@ -1,771 +1,425 @@
 <?php
-session_start();
 include 'db.php';
-require 'vendor/autoload.php'; // Include Composer's autoloader
+require_once 'includes/auth_bootstrap.php';
+if (is_file(__DIR__ . '/vendor/composer/autoload_real.php')) {
+    require_once __DIR__ . '/vendor/autoload.php';
+}
+
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
 
-// Handle AJAX requests for email and phone validation
+// Handle AJAX requests for email and phone uniqueness check (prepared statements)
 if (isset($_POST['action']) && $_POST['action'] === 'check_email_phone') {
+    header('Content-Type: application/json; charset=utf-8');
     $response = ['email_exists' => false, 'phone_exists' => false];
 
     if (!empty($_POST['email'])) {
-        $email = $_POST['email'];
-        $sql_check_email = "SELECT * FROM users WHERE email='$email'";
-        $result_check_email = $conn->query($sql_check_email);
-        if ($result_check_email->num_rows > 0) {
-            $response['email_exists'] = true;
-        }
+        $email = trim((string)$_POST['email']);
+        $stmt = $conn->prepare("SELECT id FROM users WHERE email = ? LIMIT 1");
+        $stmt->bind_param("s", $email);
+        $stmt->execute();
+        $response['email_exists'] = $stmt->get_result()->num_rows > 0;
+        $stmt->close();
     }
 
     if (!empty($_POST['phone'])) {
-        $phone = $_POST['phone'];
-        $sql_check_phone = "SELECT * FROM users WHERE phone='$phone'";
-        $result_check_phone = $conn->query($sql_check_phone);
-        if ($result_check_phone->num_rows > 0) {
-            $response['phone_exists'] = true;
-        }
+        $phone = trim((string)$_POST['phone']);
+        $stmt = $conn->prepare("SELECT id FROM users WHERE phone = ? LIMIT 1");
+        $stmt->bind_param("s", $phone);
+        $stmt->execute();
+        $response['phone_exists'] = $stmt->get_result()->num_rows > 0;
+        $stmt->close();
     }
 
     echo json_encode($response);
     exit;
 }
 
-$errors = []; // Array untuk menyimpan pesan error
+$errors = [];
+$old = [
+    'username' => '',
+    'email' => '',
+    'phone' => '',
+];
 
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $username = $_POST['username'];
-    $email = $_POST['email'];
-    $phone = $_POST['phone'];
-    $password = $_POST['password'];
-    $confirm_password = $_POST['confirm_password'];
+if (!empty($_SESSION['error'])) {
+    $errors['general'] = $_SESSION['error'];
+    unset($_SESSION['error']);
+}
 
-    // Validasi username sudah digunakan
-    $sql_check_username = "SELECT * FROM users WHERE username='$username'";
-    $result_check_username = $conn->query($sql_check_username);
-    if ($result_check_username->num_rows > 0) {
-        $errors['username'] = "Username sudah digunakan!";
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+    $username = trim((string)($_POST['username'] ?? ''));
+    $email = trim((string)($_POST['email'] ?? ''));
+    $phone = trim((string)($_POST['phone'] ?? ''));
+    $password = (string)($_POST['password'] ?? '');
+    $confirm_password = (string)($_POST['confirm_password'] ?? '');
+
+    $old = ['username' => $username, 'email' => $email, 'phone' => $phone];
+
+    if ($username === '' || strlen($username) < 3) {
+        $errors['username'] = "Username minimal 3 karakter.";
+    } else {
+        $stmt = $conn->prepare("SELECT id FROM users WHERE username = ? LIMIT 1");
+        $stmt->bind_param("s", $username);
+        $stmt->execute();
+        if ($stmt->get_result()->num_rows > 0) {
+            $errors['username'] = "Username sudah digunakan.";
+        }
+        $stmt->close();
     }
 
-    // Validasi format nomor telepon
-    if (!preg_match('/^\62[0-9]{9,13}$/', $phone)) {
-        $errors['phone'] = "Nomor telepon harus dimulai dengan 62 (tanpa +) dan memiliki panjang 9-13 digit!";
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        $errors['email'] = "Format email tidak valid.";
+    } else {
+        $stmt = $conn->prepare("SELECT id FROM users WHERE email = ? LIMIT 1");
+        $stmt->bind_param("s", $email);
+        $stmt->execute();
+        if ($stmt->get_result()->num_rows > 0) {
+            $errors['email'] = "Email sudah terdaftar.";
+        }
+        $stmt->close();
     }
 
-    // Validasi konfirmasi password
+    // Valid Indonesian international format: 62 followed by 9-13 digits (no +)
+    if (!preg_match('/^62[0-9]{9,13}$/', $phone)) {
+        $errors['phone'] = "Nomor telepon harus diawali 62 tanpa '+' (contoh: 628123456789).";
+    } else {
+        $stmt = $conn->prepare("SELECT id FROM users WHERE phone = ? LIMIT 1");
+        $stmt->bind_param("s", $phone);
+        $stmt->execute();
+        if ($stmt->get_result()->num_rows > 0) {
+            $errors['phone'] = "Nomor telepon sudah terdaftar.";
+        }
+        $stmt->close();
+    }
+
+    if (strlen($password) < 8) {
+        $errors['password'] = "Password minimal 8 karakter.";
+    }
     if ($password !== $confirm_password) {
-        $errors['confirm_password'] = "Password dan Konfirmasi Password tidak cocok!";
+        $errors['confirm_password'] = "Konfirmasi password tidak cocok.";
     }
 
-    // Validasi email sudah digunakan
-    $sql_check_email = "SELECT * FROM users WHERE email='$email'";
-    $result_check_email = $conn->query($sql_check_email);
-    if ($result_check_email->num_rows > 0) {
-        $errors['email'] = "Email sudah digunakan!";
-    }
-
-    // Validasi nomor telepon sudah digunakan
-    $sql_check_phone = "SELECT * FROM users WHERE phone='$phone'";
-    $result_check_phone = $conn->query($sql_check_phone);
-    if ($result_check_phone->num_rows > 0) {
-        $errors['phone'] = "Nomor telepon sudah digunakan!";
-    }
-
-    // Jika tidak ada error, simpan data ke database
     if (empty($errors)) {
         $hashed_password = password_hash($password, PASSWORD_DEFAULT);
-        $otp = rand(100000, 999999); // Generate OTP
-        $sql = "INSERT INTO users (username, email, phone, password, otp, is_verified)
-                VALUES ('$username', '$email', '$phone', '$hashed_password', '$otp', 0)";
-        if ($conn->query($sql) === TRUE) {
-            // Kirim OTP langsung dari register.php
-            $_SESSION['email'] = $email;
-            $emailSubject = "Account Verification OTP";
-            $emailBody = "Your OTP code is: <b>$otp</b><br>This code will expire in 2 minutes.";
+        $otp = strval(random_int(100000, 999999));
 
-            if (sendEmail($email, $emailBody, $emailSubject)) {
-                error_log("OTP sent to $email during registration.");
-                header("Location: verify_otp.php");
-                exit;
-            } else {
-                $errors['general'] = "Failed to send OTP. Please try again.";
-                error_log("Failed to send OTP to $email during registration.");
+        $stmt = $conn->prepare("INSERT INTO users (username, email, phone, password, otp, is_verified) VALUES (?, ?, ?, ?, ?, 0)");
+        $stmt->bind_param("sssss", $username, $email, $phone, $hashed_password, $otp);
+
+        if ($stmt->execute()) {
+            $stmt->close();
+            $_SESSION['email'] = $email;
+            $_SESSION['otp_expiry'] = time() + 120;
+            $_SESSION['otp_attempts'] = 0;
+
+            $smtpPass = getenv('SMTP_PASSWORD');
+            $brevoKey = getenv('BREVO_API_KEY');
+            $sent = false;
+
+            if (!empty($smtpPass)) {
+                $sent = sendRegistrationEmail($email, "Kode OTP verifikasi akun Anda adalah: <b>$otp</b><br>Kode berlaku selama 2 menit.", "Verifikasi Akun — Monitoring Termal");
+            } elseif (!empty($brevoKey)) {
+                $sent = sendBrevoEmail($email, "Kode OTP verifikasi akun Anda adalah: <b>$otp</b><br>Kode berlaku selama 2 menit.", "Verifikasi Akun — Monitoring Termal", $brevoKey);
             }
+
+            if ($sent) {
+                $_SESSION['otp_message'] = "Kode OTP telah dikirim ke $email. Berlaku selama 2 menit.";
+                unset($_SESSION['demo_otp_preview']);
+            } else {
+                // Local/demo environment without SMTP configured
+                $_SESSION['otp_message'] = "Mode lokal/demo (layanan email tidak dikonfigurasi). Gunakan kode OTP berikut untuk menyelesaikan verifikasi.";
+                $_SESSION['demo_otp_preview'] = $otp;
+            }
+
+            header("Location: verify_otp.php");
+            exit;
         } else {
-            $errors['general'] = "Error: " . $conn->error;
+            $errors['general'] = "Gagal mendaftarkan akun. Silakan coba lagi.";
+            $stmt->close();
         }
     }
 }
 
-function sendEmail($email, $body, $subject = "Notification") {
+function sendRegistrationEmail(string $email, string $body, string $subject): bool {
+    if (!class_exists(PHPMailer::class)) {
+        return false;
+    }
     $mail = new PHPMailer(true);
-
     try {
-            // Server settings
         $mail->isSMTP();
         $mail->Host = 'mail.monitoring-kenyamanan-termal.my.id';
         $mail->SMTPAuth = true;
         $mail->Username = 'noreply@monitoring-kenyamanan-termal.my.id';
-        $mail->Password = getenv('SMTP_PASSWORD'); // dari environment variable
+        $mail->Password = getenv('SMTP_PASSWORD');
         $mail->SMTPSecure = PHPMailer::ENCRYPTION_SMTPS;
         $mail->Port = 465;
         $mail->CharSet = 'UTF-8';
+        $mail->Timeout = 10;
 
-        // Set email details
-        $mail->setFrom('noreply@monitoring-kenyamanan-termal.my.id', 'Account Verification');
+        $mail->setFrom('noreply@monitoring-kenyamanan-termal.my.id', 'Monitoring Kenyamanan Termal');
         $mail->addAddress($email);
-
-        // Content
         $mail->isHTML(true);
         $mail->Subject = $subject;
-        $mail->Body = nl2br($body);
+        $mail->Body = $body;
 
         $mail->send();
         return true;
     } catch (Exception $e) {
-        error_log("Mailer Error: " . $mail->ErrorInfo);
+        error_log("Mailer Error: " . $e->getMessage());
         return false;
     }
 }
-?>
 
+function sendBrevoEmail(string $email, string $body, string $subject, string $apiKey): bool {
+    $ch = curl_init('https://api.brevo.com/v3/smtp/email');
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'api-key: ' . $apiKey,
+        'Content-Type: application/json',
+        'accept: application/json'
+    ]);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
+        'sender' => ['name' => 'Monitoring Kenyamanan Termal', 'email' => 'noreply@monitoring-kenyamanan-termal.my.id'],
+        'to' => [['email' => $email]],
+        'subject' => $subject,
+        'htmlContent' => $body,
+        'textContent' => strip_tags($body),
+    ]));
+    curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    return $code >= 200 && $code < 300;
+}
+?>
 <!DOCTYPE html>
 <html lang="id">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Register</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap');
-
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: 'Poppins', sans-serif;
-        }
-
-        body {
-            height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            overflow: hidden;
-            position: relative;
-            background-color: #0D1B2A;
-            animation: backgroundAnimation 10s infinite alternate ease-in-out;
-           overflow-y: auto; /* Tambahkan scroll jika konten terlalu panjang */
-        }
-        /* Kontainer angin */
-        .wind-container {
-            position: absolute;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-        }
-
-        /* Ikon angin */
-        .wind {
-            position: absolute;
-            font-size: 60px;
-            color: rgba(255, 255, 255, 0.6);
-            animation: wind-move linear infinite;
-        }
-
-        /* Animasi angin */
-        @keyframes wind-move {
-            from {
-                transform: translateX(-10vw);
-                opacity: 0;
-            }
-            to {
-                transform: translateX(110vw);
-                opacity: 1;
-            }
-        }
-
-        /* Variasi posisi dan durasi */
-        .wind:nth-child(1) { top: 10%; animation-duration: 8s; }
-        .wind:nth-child(2) { top: 30%; animation-duration: 10s; }
-        .wind:nth-child(3) { top: 50%; animation-duration: 12s; }
-        .wind:nth-child(4) { top: 70%; animation-duration: 14s; }
-        .wind:nth-child(5) { top: 90%; animation-duration: 16s; }
-
-        @keyframes backgroundAnimation {
-            0% { background-color: #0D1B2A; }
-            50% { background-color: #243B55; }
-            100% { background-color: #0D1B2A; }
-        }
-
-        .register-container {
-            width: 100%;
-            max-width: 400px;
-            background: rgba(255, 255, 255, 0.1);
-            backdrop-filter: blur(10px);
-            padding: 40px;
-            border-radius: 15px;
-            box-shadow: 0px 0px 15px rgba(255, 255, 255, 0.2);
-            text-align: center;
-            position: relative;
-            z-index: 10;
-            animation: fadeIn 1.5s ease-in-out;
-        }
-
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(-30px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        @keyframes typing {
-            0% { width: 0; }
-            50% { width: 100%; }
-            100% { width: 0; }
-        }
-
-        @keyframes blink {
-            50% { border-color: transparent; }
-        }
-
-        input {
-            width: 100%;
-            padding: 12px 40px;
-            background: transparent;
-            border: none;
-            border-bottom: 2px solid #B0C4DE;
-            color: white;
-            font-size: 16px;
-            outline: none;
-            transition: all 0.3s ease-in-out;
-        }
-
-        input:focus {
-            border-bottom: 2px solid rgb(36, 37, 39);
-            box-shadow: 0px 5px 15px rgba(119, 122, 129, 0.42);
-        }
-
-        label {
-            position: absolute;
-            left: 45px;
-            top: 12px;
-            color: #B0C4DE;
-            font-size: 16px;
-            transition: all 0.3s ease-in-out;
-        }
-
-        input:focus + label, input:valid + label {
-            top: -10px;
-            font-size: 14px;
-            color: rgb(14, 20, 39);
-        }
-
-        button {
-            width: 100%;
-            padding: 12px;
-            background: linear-gradient(50deg, rgb(21, 36, 58), #E0E1DD);
-            border: none;
-            border-radius: 8px;
-            color: black;
-            font-size: 18px;
-            font-weight: bold;
-            cursor: pointer;
-            transition: all 0.2s ease-in-out;
-        }
-
-        button:hover {
-            background: linear-gradient(0deg, rgb(21, 36, 58), #E0E1DD);
-            transform: scale(1.05);
-        }
-
-        .login-link {
-            font-weight: bold;
-            text-decoration: none;
-            background: linear-gradient(135deg, rgb(194, 196, 202), rgb(102, 121, 158));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            transition: all 0.3s ease-in-out;
-        }
-
-        .login-link:hover {
-            text-shadow: 0px 0px 10px rgba(24, 29, 58, 0.8);
-            transform: scale(1.1);
-        }
-
-        .floating-icons {
-            position: absolute;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            z-index: 0;
-        }
-
-                .typing-title {
-            font-size: 22px;
-            font-weight: bold;
-            color: white;
-            min-height: 60px;
-            overflow: hidden;
-            display: block;
-            white-space: normal;
-            word-wrap: break-word;
-        }
-
-        .input-group {
-            display: flex;
-            align-items: flex-start;
-            margin-bottom: 25px;
-            position: relative;
-        }
-
-        .input-group i {
-            font-size: 18px;
-            color: #B0C4DE;
-            margin-right: 10px;
-            flex-shrink: 0;
-            margin-top: 12px; /* Align icon with input */
-        }
-
-        .input-wrapper {
-            flex: 1;
-            position: relative;
-        }
-
-        .input-wrapper input {
-            width: 100%;
-            padding: 12px 10px;
-            background: transparent;
-            border: none;
-            border-bottom: 2px solid #B0C4DE;
-            color: white;
-            font-size: 16px;
-            outline: none;
-            transition: all 0.3s ease-in-out;
-        }
-
-        .input-wrapper input:focus {
-            border-bottom: 2px solid rgb(36, 37, 39);
-            box-shadow: 0px 5px 15px rgba(119, 122, 129, 0.42);
-        }
-
-        .input-wrapper label {
-            position: absolute;
-            left: 10px;
-            top: 12px;
-            color: #B0C4DE;
-            font-size: 16px;
-            transition: all 0.3s ease-in-out;
-        }
-
-        .input-wrapper input:focus + label,
-        .input-wrapper input:valid + label {
-            top: -10px;
-            font-size: 14px;
-            color: rgb(14, 20, 39);
-        }
-
-        .error-message {
-            color: red;
-            font-size: 12px;
-            margin-top: 5px;
-            background-color: rgba(255, 0, 0, 0.1);
-            padding: 5px;
-            border-radius: 5px;
-            text-align: left;
-            box-shadow: 0px 0px 10px rgba(255, 0, 0, 0.2);
-        }
-
-        .input-wrapper.error .error-message {
-            display: block; /* Show error message when input has error */
-        }
-
-        @media (max-width: 768px) {
-            .input-group {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-
-            .input-group i {
-                margin-bottom: 5px;
-                margin-top: 0;
-            }
-
-            .error-message {
-                position: static;
-                margin-top: 5px;
-            }
-        }
-
-        .icon {
-            position: absolute;
-            font-size: 40px;
-            opacity: 0.6;
-            color: white;
-            animation: float 10s infinite ease-in-out, rotate 20s infinite linear;
-        }
-
-        @keyframes float {
-            0% { transform: translateY(0); }
-            50% { transform: translateY(-40px); }
-            100% { transform: translateY(0); }
-        }
-
-        @keyframes rotate {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-
-        .error-message {
-            background-color: rgba(255, 0, 0, 0.1);
-            color: red;
-            padding: 10px;
-            border-radius: 5px;
-            margin-bottom: 15px;
-            font-size: 14px;
-            text-align: center;
-            box-shadow: 0px 0px 10px rgba(255, 0, 0, 0.2);
-        }
-        .error-message {
-            color: red;
-            font-size: 12px;
-            margin-top: 5px;
-            background-color: rgba(255, 0, 0, 0.1);
-            padding: 5px;
-            border-radius: 5px;
-        }
-    </style>
+    <title>Daftar Akun — Monitoring Kenyamanan Termal</title>
+    <link rel="icon" type="image/png" href="logo.png">
+    <?php render_theme_init_script(); ?>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="assets/css/design-system.css">
 </head>
 <body>
-    <div class="floating-icons">
-        <i class="fas fa-wind wind"></i>
-        <i class="fas fa-wind wind"></i>
-        <i class="fas fa-wind wind"></i>
-        <i class="fas fa-wind wind"></i>
-        <i class="fas fa-wind wind"></i>
-    </div>
-
-    <div class="register-container">
-        <h2 class="typing-title"></h2>
-        <form action="" method="POST">
-            <div class="input-group">
-                <i class="fas fa-user"></i>
-                <div class="input-wrapper">
-                    <input type="text" name="username" value="<?php echo htmlspecialchars($_POST['username'] ?? ''); ?>" required>
-                    <label>Username</label>
-                    <?php if (!empty($errors['username'])): ?>
-                        <div class="error-message"><?php echo $errors['username']; ?></div>
-                    <?php endif; ?>
-                </div>
+<div class="auth-page">
+    <section class="auth-visual-panel">
+        <div class="auth-brand">
+            <img src="logo.png" alt="Logo Monitoring Kenyamanan Termal" class="auth-brand-logo">
+            <div class="auth-brand-text">
+                <span class="auth-brand-name">ThermoMonitor</span>
+                <span class="auth-brand-sub">Monitoring Kenyamanan Termal</span>
             </div>
-            <div class="input-group">
-                <i class="fas fa-envelope"></i>
-                <div class="input-wrapper">
-                    <input type="email" name="email" value="<?php echo htmlspecialchars($_POST['email'] ?? ''); ?>" required>
-                    <label>Email</label>
-                    <?php if (!empty($errors['email'])): ?>
-                        <div class="error-message"><?php echo $errors['email']; ?></div>
-                    <?php endif; ?>
+        </div>
+
+        <div class="auth-artwork-wrap">
+            <img src="assets/svg/auth-illustration.svg" alt="Ilustrasi sensor kenyamanan termal ruangan" class="auth-artwork-img">
+        </div>
+
+        <div class="auth-visual-footer">
+            <p class="auth-visual-caption">
+                Konfigurasi ambang batas personal dan terima peringatan saat kondisi ruangan tidak nyaman.
+            </p>
+            <span class="status-pill-live">
+                <span class="status-dot"></span>
+                Telemetri Aktif
+            </span>
+        </div>
+    </section>
+
+    <main class="auth-form-panel">
+        <button type="button" class="btn-icon-only auth-theme-toggle" id="authThemeToggle" aria-label="Ganti tema">
+            <i class="fas fa-sun" id="authThemeIcon"></i>
+        </button>
+
+        <div class="auth-form-card">
+            <h1 class="auth-heading">Buat Akun Baru</h1>
+            <p class="auth-subheading">Daftarkan akun untuk memantau dan mengatur preferensi sensor Anda.</p>
+
+            <?php if (!empty($errors['general'])): ?>
+                <div class="alert-banner is-error" role="alert">
+                    <i class="fas fa-circle-exclamation" style="margin-top: 2px;"></i>
+                    <div><?= htmlspecialchars($errors['general']) ?></div>
                 </div>
-            </div>
-            <div class="input-group">
-                <i class="fas fa-phone"></i>
-                <div class="input-wrapper">
-                    <input type="text" name="phone" value="<?php echo htmlspecialchars($_POST['phone'] ?? ''); ?>" required>
-                    <label>Phone Number</label>
-                    <?php if (!empty($errors['phone'])): ?>
-                        <div class="error-message"><?php echo $errors['phone']; ?></div>
-                    <?php endif; ?>
+            <?php endif; ?>
+
+            <form action="register.php" method="POST" id="registerForm" novalidate>
+                <div class="form-group">
+                    <label for="username" class="form-label">Username</label>
+                    <div class="input-control-wrap">
+                        <span class="input-icon-left"><i class="fas fa-user"></i></span>
+                        <input type="text" id="username" name="username"
+                               class="form-control-ds has-left-icon <?= !empty($errors['username']) ? 'is-invalid' : '' ?>"
+                               placeholder="minimal 3 karakter"
+                               value="<?= htmlspecialchars($old['username']) ?>" required>
+                    </div>
+                    <div class="form-error" id="err-username"><?= htmlspecialchars($errors['username'] ?? '') ?></div>
                 </div>
-            </div>
-            <div class="input-group">
-                <i class="fas fa-lock"></i>
-                <div class="input-wrapper">
-                    <input type="password" name="password" required>
-                    <label>Password</label>
-                    <?php if (!empty($errors['password'])): ?>
-                        <div class="error-message"><?php echo $errors['password']; ?></div>
-                    <?php endif; ?>
+
+                <div class="form-group">
+                    <label for="email" class="form-label">Alamat Email</label>
+                    <div class="input-control-wrap">
+                        <span class="input-icon-left"><i class="fas fa-envelope"></i></span>
+                        <input type="email" id="email" name="email"
+                               class="form-control-ds has-left-icon <?= !empty($errors['email']) ? 'is-invalid' : '' ?>"
+                               placeholder="nama@email.com"
+                               value="<?= htmlspecialchars($old['email']) ?>" required>
+                    </div>
+                    <div class="form-error" id="err-email"><?= htmlspecialchars($errors['email'] ?? '') ?></div>
                 </div>
-            </div>
-            <div class="input-group">
-                <i class="fas fa-key"></i>
-                <div class="input-wrapper">
-                    <input type="password" name="confirm_password" required>
-                    <label>Konfirmasi Password</label>
-                    <?php if (!empty($errors['confirm_password'])): ?>
-                        <div class="error-message"><?php echo $errors['confirm_password']; ?></div>
-                    <?php endif; ?>
+
+                <div class="form-group">
+                    <label for="phone" class="form-label">Nomor WhatsApp / Telepon</label>
+                    <div class="input-control-wrap">
+                        <span class="input-icon-left"><i class="fas fa-phone"></i></span>
+                        <input type="tel" id="phone" name="phone"
+                               class="form-control-ds has-left-icon mono <?= !empty($errors['phone']) ? 'is-invalid' : '' ?>"
+                               placeholder="628123456789"
+                               value="<?= htmlspecialchars($old['phone']) ?>" required>
+                    </div>
+                    <p class="form-hint">Format internasional diawali 62 tanpa tanda '+' (contoh: 628123456789).</p>
+                    <div class="form-error" id="err-phone"><?= htmlspecialchars($errors['phone'] ?? '') ?></div>
                 </div>
-            </div>
-            <button type="submit"><i class="fas fa-sign-in-alt"></i> Register</button>
-        </form>
-        <p>Sudah punya akun? <a href="login.php" class="login-link">Login</a></p>
-    </div>
-    <script>
-        const titles = ["Sistem Monitoring Kenyamanan Termal", "Daftarkan Akun Barumu Sekarang"];
-        let index = 0;
-        let charIndex = 0;
-        let isDeleting = false;
-        const speed = 100;
-        const delay = 2000;
 
-        function typeEffect() {
-            const titleElement = document.querySelector(".typing-title");
-            const currentTitle = titles[index];
-            if (!isDeleting) {
-                titleElement.innerHTML = currentTitle.substring(0, charIndex) + "<span class='cursor'>|</span>";
-                charIndex++;
-                if (charIndex > currentTitle.length) {
-                    isDeleting = true;
-                    setTimeout(typeEffect, delay);
-                    return;
-                }
-            } else {
-                charIndex--;
-                if (charIndex < 0) {
-                    isDeleting = false;
-                    index = (index + 1) % titles.length;
-                }
-            }
-            setTimeout(typeEffect, isDeleting ? speed / 2 : speed);
-        }
+                <div class="form-group">
+                    <label for="password" class="form-label">Password</label>
+                    <div class="input-control-wrap">
+                        <span class="input-icon-left"><i class="fas fa-lock"></i></span>
+                        <input type="password" id="password" name="password"
+                               class="form-control-ds has-left-icon has-right-icon <?= !empty($errors['password']) ? 'is-invalid' : '' ?>"
+                               placeholder="Minimal 8 karakter" required>
+                        <button type="button" class="input-action-right toggle-pwd" data-target="password" aria-label="Tampilkan password">
+                            <i class="fas fa-eye"></i>
+                        </button>
+                    </div>
+                    <div class="form-error" id="err-password"><?= htmlspecialchars($errors['password'] ?? '') ?></div>
+                </div>
 
-        document.addEventListener("DOMContentLoaded", typeEffect);
-    </script>
-    <script>
-    document.addEventListener("DOMContentLoaded", function () {
-        const form = document.querySelector("form");
-        const usernameInput = document.querySelector("input[name='username']");
-        const emailInput = document.querySelector("input[name='email']");
-        const phoneInput = document.querySelector("input[name='phone']");
-        const passwordInput = document.querySelector("input[name='password']");
-        const confirmPasswordInput = document.querySelector("input[name='confirm_password']");
+                <div class="form-group">
+                    <label for="confirm_password" class="form-label">Konfirmasi Password</label>
+                    <div class="input-control-wrap">
+                        <span class="input-icon-left"><i class="fas fa-key"></i></span>
+                        <input type="password" id="confirm_password" name="confirm_password"
+                               class="form-control-ds has-left-icon has-right-icon <?= !empty($errors['confirm_password']) ? 'is-invalid' : '' ?>"
+                               placeholder="Ulangi password" required>
+                        <button type="button" class="input-action-right toggle-pwd" data-target="confirm_password" aria-label="Tampilkan konfirmasi password">
+                            <i class="fas fa-eye"></i>
+                        </button>
+                    </div>
+                    <div class="form-error" id="err-confirm_password"><?= htmlspecialchars($errors['confirm_password'] ?? '') ?></div>
+                </div>
 
-        form.addEventListener("submit", function (e) {
-            let isValid = true;
+                <button type="submit" class="btn-ds btn-ds-primary" style="width: 100%; margin-top: 8px;">
+                    <span>Daftar Akun</span>
+                    <i class="fas fa-arrow-right" style="font-size: 13px;"></i>
+                </button>
+            </form>
 
-            // Clear previous error messages
-            document.querySelectorAll(".input-wrapper").forEach(wrapper => wrapper.classList.remove("error"));
+            <p style="text-align: center; margin-top: 22px; font-size: 14px; color: var(--text-secondary);">
+                Sudah memiliki akun?
+                <a href="login.php" style="font-weight: 700;">Masuk di sini</a>
+            </p>
+        </div>
+    </main>
+</div>
 
-            // Validate username
-            if (usernameInput.value.trim() === "") {
-                showError(usernameInput, "Username tidak boleh kosong!");
-                isValid = false;
-            }
-
-            // Validate email
-            if (!validateEmail(emailInput.value)) {
-                showError(emailInput, "Format email tidak valid!");
-                isValid = false;
-            }
-
-            // Validate phone number
-            if (!/^\+62[0-9]{9,13}$/.test(phoneInput.value)) {
-                showError(phoneInput, "Nomor telepon harus dimulai dengan 62 (tanpa +) dan memiliki panjang 9-13 digit!");
-                isValid = false;
-            }
-
-            // Validate password
-            if (!validatePassword(passwordInput.value)) {
-                showError(passwordInput, "Password harus memiliki huruf kapital, huruf kecil, angka, dan simbol (@, _).");
-                isValid = false;
-            }
-
-            // Validate confirm password
-            if (passwordInput.value !== confirmPasswordInput.value) {
-                showError(confirmPasswordInput, "Password dan Konfirmasi Password tidak cocok!");
-                isValid = false;
-            }
-
-            if (!isValid) {
-                e.preventDefault(); // Prevent form submission
-            }
-        });
-
-        function showError(input, message) {
-            const wrapper = input.parentElement;
-            let errorMessage = wrapper.querySelector(".error-message");
-
-            if (!errorMessage) {
-                // Jika elemen error-message belum ada, buat elemen baru
-                errorMessage = document.createElement("div");
-                errorMessage.className = "error-message";
-                wrapper.appendChild(errorMessage);
-            }
-
-            // Perbarui teks pesan error
-            errorMessage.textContent = message;
-        }
-
-        function clearError(input) {
-            const wrapper = input.parentElement;
-            const errorMessage = wrapper.querySelector(".error-message");
-
-            if (errorMessage) {
-                errorMessage.remove(); // Hapus elemen error-message jika ada
-            }
-        }
-
-        function validateEmail(email) {
-            const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-            return re.test(email);
-        }
-
-        function validatePassword(password) {
-            const re = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@_])[A-Za-z\d@_]{8,}$/;
-            return re.test(password);
-        }
-    });
-</script>
 <script>
-    document.addEventListener("DOMContentLoaded", function () {
-        const emailInput = document.querySelector("input[name='email']");
-        const phoneInput = document.querySelector("input[name='phone']");
-
-        emailInput.addEventListener("blur", function () {
-            checkEmailPhone({ email: emailInput.value });
+(function() {
+    document.querySelectorAll('.toggle-pwd').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const target = document.getElementById(this.dataset.target);
+            if (!target) return;
+            const show = target.type === 'password';
+            target.type = show ? 'text' : 'password';
+            const icon = this.querySelector('i');
+            if (icon) icon.className = show ? 'fas fa-eye-slash' : 'fas fa-eye';
         });
-
-        phoneInput.addEventListener("blur", function () {
-            checkEmailPhone({ phone: phoneInput.value });
-        });
-
-        function checkEmailPhone(data) {
-            fetch("", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
-                body: new URLSearchParams({
-                    action: "check_email_phone",
-                    ...data,
-                }),
-            })
-                .then((response) => response.json())
-                .then((result) => {
-                   if (result.email_exists) {
-                        showError(emailInput, "Email sudah digunakan!");
-                    } else {
-                        clearError(emailInput);
-                    }
-
-                    if (result.phone_exists) {
-                        showError(phoneInput, "Nomor telepon sudah digunakan!");
-                    } else {
-                        clearError(phoneInput);
-                    }
-                })
-                .catch((error) => console.error("Error:", error));
-        }
-
-        function showError(input, message) {
-            const wrapper = input.parentElement;
-            let errorMessage = wrapper.querySelector(".error-message");
-
-            if (!errorMessage) {
-                // Jika elemen error-message belum ada, buat elemen baru
-                errorMessage = document.createElement("div");
-                errorMessage.className = "error-message";
-                wrapper.appendChild(errorMessage);
-            }
-
-            // Perbarui teks pesan error
-            errorMessage.textContent = message;
-        }
-
-        function clearError(input) {
-            const wrapper = input.parentElement;
-            const errorMessage = wrapper.querySelector(".error-message");
-
-            if (errorMessage) {
-                errorMessage.remove(); // Hapus elemen error-message jika ada
-            }
-        }
     });
-</script>
-<script>
-    document.addEventListener("DOMContentLoaded", function () {
-        const form = document.querySelector("form");
-        const emailInput = document.querySelector("input[name='email']");
-        const phoneInput = document.querySelector("input[name='phone']");
 
-        let isEmailValid = true; // Global flag for email validation
-        let isPhoneValid = true; // Global flag for phone validation
-
-        emailInput.addEventListener("blur", function () {
-            checkEmailPhone({ email: emailInput.value }, "email");
+    const themeBtn = document.getElementById('authThemeToggle');
+    const themeIcon = document.getElementById('authThemeIcon');
+    function syncIcon() {
+        const t = document.documentElement.getAttribute('data-theme') || 'dark';
+        if (themeIcon) themeIcon.className = t === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
+    }
+    syncIcon();
+    if (themeBtn) {
+        themeBtn.addEventListener('click', function() {
+            const next = (document.documentElement.getAttribute('data-theme') || 'dark') === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', next);
+            localStorage.setItem('thermal_theme', next);
+            syncIcon();
         });
+    }
 
-        phoneInput.addEventListener("blur", function () {
-            checkEmailPhone({ phone: phoneInput.value }, "phone");
-        });
-            // Prevent form submission if email or phone validation fails
-            if (!isEmailValid || !isPhoneValid) {
-                e.preventDefault();
-                alert("Periksa kembali email atau nomor telepon Anda!");
+    const form = document.getElementById('registerForm');
+    const emailInput = document.getElementById('email');
+    const phoneInput = document.getElementById('phone');
+    let emailAvailable = true;
+    let phoneAvailable = true;
+
+    function setErr(field, msg) {
+        const el = document.getElementById('err-' + field);
+        const inp = document.getElementById(field);
+        if (el) el.textContent = msg;
+        if (inp) inp.classList.toggle('is-invalid', Boolean(msg));
+    }
+
+    function checkUniqueness(payload, field) {
+        fetch('register.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ action: 'check_email_phone', ...payload })
+        })
+        .then(r => r.json())
+        .then(res => {
+            if (field === 'email') {
+                emailAvailable = !res.email_exists;
+                setErr('email', res.email_exists ? 'Email sudah terdaftar.' : '');
             }
-        });
-
-        function checkEmailPhone(data, type) {
-            fetch("", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
-                body: new URLSearchParams({
-                    action: "check_email_phone",
-                    ...data,
-                }),
-            })
-                .then((response) => response.json())
-                .then((result) => {
-                    console.log(result); // Debugging: Periksa respons dari server
-                    if (type === "email") {
-                        if (result.email_exists) {
-                            showError(emailInput, "Email sudah digunakan!");
-                            isEmailValid = false;
-                        } else {
-                            clearError(emailInput);
-                            isEmailValid = true;
-                        }
-                    }
-
-                    if (type === "phone") {
-                        if (result.phone_exists) {
-                            showError(phoneInput, "Nomor telepon sudah digunakan!");
-                            isPhoneValid = false;
-                        } else {
-                            clearError(phoneInput);
-                            isPhoneValid = true;
-                        }
-                    }
-                })
-                .catch((error) => console.error("Error:", error));
-        }
-
-        function showError(input, message) {
-            const wrapper = input.parentElement;
-            let errorMessage = wrapper.querySelector(".error-message");
-
-            if (!errorMessage) {
-                // Jika elemen error-message belum ada, buat elemen baru
-                errorMessage = document.createElement("div");
-                errorMessage.className = "error-message";
-                wrapper.appendChild(errorMessage);
+            if (field === 'phone') {
+                phoneAvailable = !res.phone_exists;
+                setErr('phone', res.phone_exists ? 'Nomor telepon sudah terdaftar.' : '');
             }
+        })
+        .catch(() => {});
+    }
 
-            // Perbarui teks pesan error
-            errorMessage.textContent = message;
-        }
-
-        function clearError(input) {
-            const wrapper = input.parentElement;
-            const errorMessage = wrapper.querySelector(".error-message");
-
-            if (errorMessage) {
-                errorMessage.remove(); // Hapus elemen error-message jika ada
-            }
-        }
+    emailInput.addEventListener('blur', () => {
+        if (emailInput.value.trim()) checkUniqueness({ email: emailInput.value.trim() }, 'email');
     });
+    phoneInput.addEventListener('blur', () => {
+        if (phoneInput.value.trim()) checkUniqueness({ phone: phoneInput.value.trim() }, 'phone');
+    });
+
+    form.addEventListener('submit', function(e) {
+        let valid = true;
+        const username = document.getElementById('username').value.trim();
+        const email = emailInput.value.trim();
+        const phone = phoneInput.value.trim();
+        const pwd = document.getElementById('password').value;
+        const cpwd = document.getElementById('confirm_password').value;
+
+        setErr('username', '');
+        setErr('email', emailAvailable ? '' : 'Email sudah terdaftar.');
+        setErr('phone', phoneAvailable ? '' : 'Nomor telepon sudah terdaftar.');
+        setErr('password', '');
+        setErr('confirm_password', '');
+
+        if (username.length < 3) { setErr('username', 'Username minimal 3 karakter.'); valid = false; }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setErr('email', 'Format email tidak valid.'); valid = false; }
+        if (!/^62[0-9]{9,13}$/.test(phone)) { setErr('phone', "Nomor telepon harus diawali 62 tanpa '+' (9–13 digit setelah 62)."); valid = false; }
+        if (pwd.length < 8) { setErr('password', 'Password minimal 8 karakter.'); valid = false; }
+        if (pwd !== cpwd) { setErr('confirm_password', 'Konfirmasi password tidak cocok.'); valid = false; }
+        if (!emailAvailable || !phoneAvailable) valid = false;
+
+        if (!valid) e.preventDefault();
+    });
+})();
 </script>
 </body>
 </html>

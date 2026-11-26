@@ -1,293 +1,337 @@
 <?php
-session_start();
 include 'db.php';
-if (!isset($_SESSION['user_id']) && isset($_COOKIE['remember_token'])) {
-    $token = $_COOKIE['remember_token'];
-    $stmt = $conn->prepare("SELECT id, username FROM users WHERE remember_token = ?");
-    $stmt->bind_param("s", $token);
-    $stmt->execute();
-    $result = $stmt->get_result();
+require_once 'includes/auth_bootstrap.php';
 
-    if ($user = $result->fetch_assoc()) {
-        $_SESSION['user_id'] = $user['id'];
-        $_SESSION['username'] = $user['username'];
-    }
-}
+$user = require_authenticated_user($conn);
 
-// Jika masih belum login, redirect
-if (!isset($_SESSION['user_id'])) {
-    header("Location: login.php");
-    exit();
-}
+$startDate = trim((string)($_GET['start_date'] ?? ''));
+$endDate = trim((string)($_GET['end_date'] ?? ''));
 
-$user_id = $_SESSION['user_id'];
-
-// Ambil data user dari database berdasarkan sesi user_id
-$query = $conn->prepare("SELECT username, email, phone, profile_pic FROM users WHERE id = ?");
-$query->bind_param("i", $user_id);
-$query->execute();
-$result = $query->get_result();
-$user = $result->fetch_assoc();
-
-$startDate = $_GET['start_date'] ?? '';
-$endDate = $_GET['end_date'] ?? '';
-
+$activeNav = 'history';
+$pageTitle = 'Data Historis Sensor';
 ?>
-
 <!DOCTYPE html>
 <html lang="id">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Historis — Monitoring Kenyamanan Termal</title>
     <link rel="icon" type="image/png" href="logo.png">
-    <title>Data Historis Sensor</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/dataTables.bootstrap5.min.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
-    <script src="https://cdn.datatables.net/1.13.4/js/dataTables.bootstrap5.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.17.3/xlsx.full.min.js"></script>
+    <?php render_theme_init_script(); ?>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/jquery.dataTables.min.css">
+    <link rel="stylesheet" href="assets/css/design-system.css">
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <style>
-                body { background-color: #0d1117; color: white; }
-        .dark-mode { background-color: #cbd5e1; color: #333; }
-        .dark-mode .bg-gray-900 { background: #ffffff; color: black; }
-        .dark-mode .bg-gray-800 { background: #e2e8f0; color: black; }
-        .dark-mode .timeframe-card { background: #e2e8f0; color: black; }
-        .dark-mode .timeframe-card:hover, .dark-mode .timeframe-card.active { background: #cbd5e1; }
-               /* Warna teks navbar saat dark mode */
-               .dark-mode .navbar {
-            color: black !important;
+        .summary-strip {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-bottom: 20px;
         }
-
-        .dark-mode .navbar a {
-            color: black !important;
-        }
-
-        .dark-mode .navbar a:hover {
-            color: #555 !important; /* Warna teks saat hover */
-        }
-        .dataTables_wrapper .dataTables_filter {
-            float: right !important;
-            text-align: right !important;
-            margin-bottom: 10px !important;
-        }
-        .dataTables_wrapper .dataTables_length {
-            float: left !important;
-            margin-bottom: 10px !important;
-        }
-        .dataTables_wrapper .dataTables_paginate {
-            float: right !important;
-            text-align: right !important;
-        }
-        .w-full.max-w-6xl {
-            margin-top: 6.5rem; /* Atur margin top menjadi 6.5rem */
-            margin-left: auto; /* Atur margin kiri otomatis */
-            margin-right: auto; /* Atur margin kanan otomatis */
-        }
-        .sidebar-item:hover {
-            background-color: #374151;
-        }
-        .sidebar-item.active {
-            background-color: #1e40af;
-        }
-        .profile-pic {
-            width: 120px !important;
-            height: 120px !important;
-            object-fit: cover;
-        }
-        .profile-pic-container {
-            position: relative;
-            display: inline-block;
-        }
-        .profile-pic-edit {
-            position: absolute;
-            bottom: 0;
-            right: 0;
-            background: rgba(0,0,0,0.7);
-            color: white;
-            border-radius: 50%;
-            width: 30px;
-            height: 30px;
+        .summary-tile {
+            padding: 18px 20px;
             display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
+            flex-direction: column;
+            gap: 4px;
         }
-        footer {
-            background: none; /* Tanpa latar belakang */
-            color: #6b7280; /* Warna teks abu-abu */
-            font-size: 0.875rem; /* Ukuran teks kecil */
+        .summary-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
-
-        footer a {
-            color: #60a5fa; /* Warna link biru */
-            text-decoration: none;
-            transition: color 0.3s ease-in-out;
+        .summary-val {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--text-primary);
         }
-
-        footer a:hover {
-            color: #3b82f6; /* Warna lebih terang saat hover */
+        .filter-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr auto;
+            gap: 14px;
+            align-items: end;
+        }
+        .table-scroll-wrap {
+            width: 100%;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        /* Clean DataTables theming aligned with design system */
+        .dataTables_wrapper {
+            color: var(--text-secondary);
+            font-size: 13.5px;
+        }
+        .dataTables_wrapper .dataTables_length select,
+        .dataTables_wrapper .dataTables_filter input {
+            background: var(--bg-input);
+            color: var(--text-primary);
+            border: 1px solid var(--border-default);
+            border-radius: var(--radius-sm);
+            padding: 6px 10px;
+            outline: none;
+        }
+        .dataTables_wrapper .dataTables_filter input:focus {
+            border-color: var(--brand-primary);
+        }
+        table.dataTable {
+            width: 100% !important;
+            border-collapse: collapse !important;
+            margin: 14px 0 !important;
+        }
+        table.dataTable thead th {
+            background: var(--bg-surface-2);
+            color: var(--text-secondary);
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 13px 16px !important;
+            border-bottom: 1px solid var(--border-default) !important;
+            white-space: nowrap;
+        }
+        table.dataTable tbody td {
+            padding: 13px 16px !important;
+            border-bottom: 1px solid var(--border-subtle) !important;
+            color: var(--text-primary);
+            font-family: var(--font-mono);
+            font-size: 13px;
+            white-space: nowrap;
+        }
+        table.dataTable tbody tr {
+            background: transparent !important;
+            transition: background-color 0.12s ease;
+        }
+        table.dataTable tbody tr:hover {
+            background: var(--bg-surface-2) !important;
+        }
+        .dataTables_wrapper .dataTables_paginate .paginate_button {
+            color: var(--text-secondary) !important;
+            border-radius: 6px !important;
+            border: 1px solid transparent !important;
+            padding: 5px 11px !important;
+            margin-left: 4px !important;
+        }
+        .dataTables_wrapper .dataTables_paginate .paginate_button.current,
+        .dataTables_wrapper .dataTables_paginate .paginate_button.current:hover {
+            background: var(--brand-primary) !important;
+            color: #042f2e !important;
+            border-color: var(--brand-primary) !important;
+            font-weight: 700;
+        }
+        .dataTables_wrapper .dataTables_paginate .paginate_button:hover {
+            background: var(--bg-surface-3) !important;
+            color: var(--text-primary) !important;
+            border-color: var(--border-default) !important;
+        }
+        @media (max-width: 960px) {
+            .summary-strip { grid-template-columns: repeat(2, 1fr); }
+            .filter-grid { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 520px) {
+            .summary-strip { grid-template-columns: 1fr; }
         }
     </style>
 </head>
-<body class="bg-gray-900 text-white min-h-screen pt -8">
-<?php include 'nav.php'; ?>
+<body>
+<div class="app-shell">
+    <?php include 'nav.php'; ?>
 
-<div class="w-full max-w-6xl bg-gray-900 p-6 rounded-lg shadow-xl mt-20">
-    <h2 class="text-4xl font-bold text-center mb-6">📡 Data Historis Sensor</h2>
+    <main class="app-content">
+        <!-- Period Summary Strip -->
+        <section class="summary-strip" aria-label="Ringkasan periode data">
+            <div class="surface-card summary-tile">
+                <span class="summary-label">Total Pembacaan</span>
+                <span class="summary-val mono" id="statTotal">--</span>
+            </div>
+            <div class="surface-card summary-tile">
+                <span class="summary-label">Rata-rata Suhu</span>
+                <span class="summary-val mono" id="statTemp">-- °C</span>
+            </div>
+            <div class="surface-card summary-tile">
+                <span class="summary-label">Rata-rata Kelembapan</span>
+                <span class="summary-val mono" id="statHumid">-- %</span>
+            </div>
+            <div class="surface-card summary-tile">
+                <span class="summary-label">Puncak CO₂</span>
+                <span class="summary-val mono" id="statCo2">-- ppm</span>
+            </div>
+        </section>
 
-    <form method="GET" class="row g-3">
-        <div class="col-md-5">
-            <label for="start_date" class="form-label">Dari Tanggal:</label>
-            <input type="date" class="form-control" name="start_date" value="<?= $startDate ?>">
-        </div>
-        <div class="col-md-5">
-            <label for="end_date" class="form-label">Sampai Tanggal:</label>
-            <input type="date" class="form-control" name="end_date" value="<?= $endDate ?>">
-        </div>
-        <div class="col-md-2 d-flex align-items-end">
-            <button type="submit" class="btn btn-primary w-100">Cari</button>
-        </div>
-    </form>
-        <div class="mt-3">
-            <button class="btn btn-success me-2" onclick="exportCSV()">Export CSV</button>
- <button class="btn btn-info" onclick="exportXLSX()">Export XLSX</button>
-        </div>
-    <div class="container mt-5">
-    <table id="sensorTable" class="table table-striped table-bordered table-sm">
-        <thead class="table-dark">
-            <tr>
-                <th>Tanggal & Waktu</th>
-                <th>Suhu (°C)</th>
-                <th>Kelembaban (%)</th>
-                <th>Kecepatan Angin (m/s)</th>
-                <th>Kualitas Udara (CO2)</th>
-            </tr>
-        </thead>
-        <tbody>
-            <!-- Data akan diisi oleh DataTable -->
-        </tbody>
-    </table>
-    </div>
+        <!-- Filter & Export Toolbar -->
+        <section class="surface-card" style="margin-bottom: 20px;">
+            <div class="surface-card-header">
+                <div>
+                    <h2 class="surface-card-title">Filter Rentang Tanggal</h2>
+                    <p class="surface-card-sub">Saring catatan sensor berdasarkan periode atau ekspor ke CSV/Excel</p>
+                </div>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                    <button type="button" class="btn-ds btn-ds-secondary btn-ds-sm" onclick="applyPreset(1)">Hari Ini</button>
+                    <button type="button" class="btn-ds btn-ds-secondary btn-ds-sm" onclick="applyPreset(7)">7 Hari</button>
+                    <button type="button" class="btn-ds btn-ds-secondary btn-ds-sm" onclick="applyPreset(30)">30 Hari</button>
+                    <button type="button" class="btn-ds btn-ds-ghost btn-ds-sm" onclick="resetFilter()">Reset</button>
+                </div>
+            </div>
+            <div class="surface-card-body">
+                <form id="filterForm" method="GET" class="filter-grid">
+                    <div>
+                        <label for="start_date" class="form-label">Dari Tanggal</label>
+                        <input type="date" id="start_date" name="start_date" class="form-control-ds" value="<?= htmlspecialchars($startDate) ?>">
+                    </div>
+                    <div>
+                        <label for="end_date" class="form-label">Sampai Tanggal</label>
+                        <input type="date" id="end_date" name="end_date" class="form-control-ds" value="<?= htmlspecialchars($endDate) ?>">
+                    </div>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <button type="submit" class="btn-ds btn-ds-primary">
+                            <i class="fas fa-filter"></i> Terapkan
+                        </button>
+                        <button type="button" class="btn-ds btn-ds-secondary" onclick="exportCSV()">
+                            <i class="fas fa-file-csv"></i> CSV
+                        </button>
+                        <button type="button" class="btn-ds btn-ds-secondary" onclick="exportXLSX()">
+                            <i class="fas fa-file-excel"></i> XLSX
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </section>
 
-    <script>
-        $(document).ready(function() {
-            $('#sensorTable').DataTable({
-                "processing": true,
-                "serverSide": true,
-                "ajax": {
-                    "url": "sensor_data.php",
-                    "type": "POST",
-                    "data": function(d) {
-                        d.start_date = $('input[name="start_date"]').val();
-                        d.end_date = $('input[name="end_date"]').val();
-                    }
-                },
-                "columns": [
-                    { "data": "reading_time" },
-                    { "data": "temperature" },
-                    { "data": "humidity" },
-                    { "data": "wind_speed" },
-                    { "data": "air_quality" }
-                ],
-                "order": [[0, "desc"]],
-                "lengthMenu": [[10, 20, 50, 100, -1], [10, 20, 50, 100, "Semua"]],
-                "language": {
-                    "lengthMenu": "Tampilkan _MENU_ entri per halaman",
-                    "zeroRecords": "Tidak ada data yang ditemukan",
-                    "info": "Menampilkan _START_ hingga _END_ dari _TOTAL_ entri",
-                    "infoEmpty": "Menampilkan 0 hingga 0 dari 0 entri",
-                    "infoFiltered": "(difilter dari total _MAX_ entri)",
-                    "search": "Cari:",
-                    "paginate": {
-                        "first": "Pertama",
-                        "last": "Terakhir",
-                        "next": "Berikutnya",
-                        "previous": "Sebelumnya"
-                    }
-                }
-            });
-        });
-            function exportCSV() {
-            let csv = 'Tanggal & Waktu,Suhu (°C),Kelembaban (%),Kecepatan Angin (m/s),Kualitas Udara (CO2)\n';
-            document.querySelectorAll('#sensorTable tbody tr').forEach(row => {
-                let rowData = [];
-                row.querySelectorAll('td').forEach(cell => rowData.push(cell.innerText));
-                csv += rowData.join(',') + '\n';
-            });
-            let blob = new Blob([csv], { type: 'text/csv' });
-            let link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = 'data_historis.csv';
-            link.click();
-        }
+        <!-- Data Table -->
+        <section class="surface-card">
+            <div class="surface-card-header">
+                <div>
+                    <h2 class="surface-card-title">Tabel Log Pembacaan Sensor</h2>
+                    <p class="surface-card-sub">Klik judul kolom untuk mengurutkan data</p>
+                </div>
+            </div>
+            <div class="surface-card-body">
+                <div class="table-scroll-wrap">
+                    <table id="sensorTable" class="display" style="width:100%">
+                        <thead>
+                            <tr>
+                                <th>Tanggal &amp; Waktu</th>
+                                <th>Suhu (°C)</th>
+                                <th>Kelembapan (%)</th>
+                                <th>Kecepatan Angin (m/s)</th>
+                                <th>Kualitas Udara (ppm)</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+    </main>
 
-        function exportXLSX() {
-            let table = document.querySelector("#sensorTable");
-            let wb = XLSX.utils.table_to_book(table, { sheet: "Data Historis" });
-            XLSX.writeFile(wb, "data_historis.xlsx");
-        }
+    <footer class="app-footer">
+        <span>&copy; <?= date('Y') ?> Monitoring Kenyamanan Termal. All rights reserved.</span>
+        <span>Data Historis Sensor</span>
+    </footer>
+</div>
+</div>
 
-    document.addEventListener("DOMContentLoaded", function () {
-        const tableBody = document.querySelector("#sensorTable tbody");
-        const searchForm = document.querySelector("form");
+<script>
+let dataTable;
 
-        searchForm.addEventListener("submit", function (e) {
-            if (tableBody.children.length === 0) {
-                e.preventDefault(); // Mencegah pengiriman form jika tidak ada data
-                showNoDataPopup(); // Tampilkan pop-up
+$(document).ready(function() {
+    dataTable = $('#sensorTable').DataTable({
+        processing: true,
+        serverSide: true,
+        ajax: {
+            url: 'sensor_data.php',
+            type: 'POST',
+            data: function(d) {
+                d.start_date = $('#start_date').val();
+                d.end_date = $('#end_date').val();
+            },
+            dataSrc: function(json) {
+                $('#statTotal').text(Number(json.recordsFiltered || 0).toLocaleString('id-ID'));
+                const s = json.stats || {};
+                $('#statTemp').text(s.avg_temp != null ? s.avg_temp + ' °C' : '-- °C');
+                $('#statHumid').text(s.avg_humidity != null ? s.avg_humidity + ' %' : '-- %');
+                $('#statCo2').text(s.max_co2 != null ? s.max_co2 + ' ppm' : '-- ppm');
+                return json.data || [];
             }
-        });
+        },
+        columns: [
+            { data: 'reading_time' },
+            { data: 'temperature', render: v => Number(v).toFixed(1) + ' °C' },
+            { data: 'humidity', render: v => Number(v).toFixed(1) + ' %' },
+            { data: 'wind_speed', render: v => Number(v).toFixed(1) + ' m/s' },
+            { data: 'air_quality', render: v => Math.round(Number(v)) + ' ppm' }
+        ],
+        order: [[0, 'desc']],
+        lengthMenu: [[10, 25, 50, 100, -1], [10, 25, 50, 100, 'Semua']],
+        language: {
+            processing: 'Memuat data...',
+            lengthMenu: 'Tampilkan _MENU_ baris',
+            zeroRecords: 'Tidak ada data sensor pada rentang tanggal yang dipilih.',
+            info: 'Menampilkan _START_–_END_ dari _TOTAL_ data',
+            infoEmpty: 'Menampilkan 0 data',
+            infoFiltered: '(disaring dari _MAX_ total data)',
+            search: 'Cari:',
+            paginate: { first: 'Awal', last: 'Akhir', next: 'Berikutnya', previous: 'Sebelumnya' }
+        }
     });
 
-    function showNoDataPopup() {
-        const modal = document.createElement("div");
-        modal.classList.add("modal");
-        modal.style.display = "flex";
-        modal.style.justifyContent = "center";
-        modal.style.alignItems = "center";
-        modal.style.position = "fixed";
-        modal.style.top = "0";
-        modal.style.left = "0";
-        modal.style.width = "100%";
-        modal.style.height = "100%";
-        modal.style.backgroundColor = "rgba(0, 0, 0, 0.8)";
-        modal.innerHTML = `
-            <div class="modal-content" style="background: white; padding: 20px; border-radius: 8px; text-align: center;">
-                <h2 style="color: red;">⚠️ Data Tidak Ditemukan</h2>
-                <p>Data pada rentang tanggal yang dipilih tidak tersedia.</p>
-                <button onclick="closeModal()" style="margin-top: 10px; padding: 10px 20px; background: red; color: white; border: none; border-radius: 5px; cursor: pointer;">OK</button>
-            </div>
-        `;
-        document.body.appendChild(modal);
-    }
+    $('#filterForm').on('submit', function(e) {
+        e.preventDefault();
+        dataTable.ajax.reload();
+    });
+});
 
-    function closeModal() {
-        const modal = document.querySelector(".modal");
-        if (modal) {
-            modal.remove();
-        }
-    }
-    </script>
+function formatDate(d) {
+    return d.toISOString().slice(0, 10);
+}
 
-    <!-- Footer -->
-    <footer class="text-gray-500 text-center py-4 mt-10">
-        <div class="container mx-auto px-4">
-            <p class="text-sm">
-                &copy; <?php echo date('Y'); ?> Monitoring Kenyamanan Termal. All rights reserved.
-            </p>
-            <p class="text-xs mt-2">
-                Dibuat dengan ❤️ oleh
-                <a href="https://www.linkedin.com/in/desi-armanda-sari" target="_blank"
-                   class="text-blue-400 hover:text-blue-500 underline transition-all duration-300">
-                    Desi Armanda Sari
-                </a>.
-            </p>
-            <p class="text-xs mt-2 italic text-gray-400">
-                "Kalau ada bug, itu fitur tersembunyi. Kalau lancar, itu keajaiban mahasiswa tingkat akhir." 😄
-            </p>
-        </div>
-    </footer>
+function applyPreset(days) {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - (days - 1));
+    $('#start_date').val(formatDate(start));
+    $('#end_date').val(formatDate(end));
+    dataTable.ajax.reload();
+}
+
+function resetFilter() {
+    $('#start_date').val('');
+    $('#end_date').val('');
+    dataTable.ajax.reload();
+}
+
+function exportCSV() {
+    const rows = dataTable.rows({ search: 'applied' }).data().toArray();
+    if (!rows.length) return;
+    let csv = 'Tanggal & Waktu,Suhu (°C),Kelembapan (%),Kecepatan Angin (m/s),Kualitas Udara (ppm)\n';
+    rows.forEach(r => {
+        csv += `"${r.reading_time}",${r.temperature},${r.humidity},${r.wind_speed},${r.air_quality}\n`;
+    });
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'data_historis_termal.csv';
+    link.click();
+}
+
+function exportXLSX() {
+    const rows = dataTable.rows({ search: 'applied' }).data().toArray();
+    if (!rows.length) return;
+    const sheetData = rows.map(r => ({
+        'Tanggal & Waktu': r.reading_time,
+        'Suhu (°C)': r.temperature,
+        'Kelembapan (%)': r.humidity,
+        'Kecepatan Angin (m/s)': r.wind_speed,
+        'Kualitas Udara (ppm)': r.air_quality
+    }));
+    const ws = XLSX.utils.json_to_sheet(sheetData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Data Historis');
+    XLSX.writeFile(wb, 'data_historis_termal.xlsx');
+}
+</script>
 </body>
 </html>
