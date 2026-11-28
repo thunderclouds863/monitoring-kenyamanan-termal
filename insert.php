@@ -12,7 +12,7 @@ $pass = getenv('DB_PASS');
 $dbname = "figflzel_data";
 
 // Create connection
-$conn = new mysqli($host, $user, $pass, $dbname);
+$conn = demo_mysqli($host, $user, $pass, $dbname);
 $conn->options(MYSQLI_OPT_CONNECT_TIMEOUT, 5);
 $conn->options(MYSQLI_OPT_READ_TIMEOUT, 5);
 

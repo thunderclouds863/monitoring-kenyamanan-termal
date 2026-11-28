@@ -2,6 +2,14 @@
 // Kode ditulis untuk PHP/XAMPP lama: matikan exception mysqli default PHP 8.1+
 mysqli_report(MYSQLI_REPORT_OFF);
 
+// DB eksternal (Vercel/TiDB) + session di database; tanpa env DB_HOST perilaku tetap seperti semula
+if (is_file('/var/www/html/deploy/db_compat.php')) require_once '/var/www/html/deploy/db_compat.php';
+if (function_exists('demo_db_external') && demo_db_external()
+    && in_array(basename($_SERVER['SCRIPT_NAME'] ?? ''), ['index.php', 'get_data.php', 'sensor_data.php', 'check_and_notify.php'], true)) {
+    require_once '/var/www/html/deploy/demo_sensor_feed.php';
+    demo_sensor_feed();
+}
+
 // Demo portfolio: sisipkan kotak "Akun Demo" di halaman login (konfigurasi di deploy/demo_banner.php).
 (function () {
     $cfgFile = '/var/www/html/deploy/demo_banner.php';
