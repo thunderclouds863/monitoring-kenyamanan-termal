@@ -159,7 +159,7 @@ class ConditionChecker {
 
     private function shouldNotify(string $sensor, float $value, string $currentStatus): bool {
         $userId = (int)$this->user['id'];
-        $stmt = $this->conn->prepare("SELECT last_value, last_status, last_notified_at FROM last_alerts WHERE user_id = ? AND sensor_type = ?");
+        $stmt = $this->conn->prepare("SELECT `last_value`, last_status, last_notified_at FROM last_alerts WHERE user_id = ? AND sensor_type = ?");
         $stmt->bind_param("is", $userId, $sensor);
         $stmt->execute();
         $last = $stmt->get_result()->fetch_assoc();
@@ -187,9 +187,9 @@ class ConditionChecker {
 
     private function updateLastAlert(string $sensor, float $value, string $status): void {
         $stmt = $this->conn->prepare("
-            INSERT INTO last_alerts (user_id, sensor_type, last_value, last_status, last_notified_at)
+            INSERT INTO last_alerts (user_id, sensor_type, `last_value`, last_status, last_notified_at)
             VALUES (?, ?, ?, ?, NOW())
-            ON DUPLICATE KEY UPDATE last_value = VALUES(last_value), last_status = VALUES(last_status), last_notified_at = NOW()
+            ON DUPLICATE KEY UPDATE `last_value` = VALUES(`last_value`), last_status = VALUES(last_status), last_notified_at = NOW()
         ");
         $uid = (int)$this->user['id'];
         $stmt->bind_param("isds", $uid, $sensor, $value, $status);

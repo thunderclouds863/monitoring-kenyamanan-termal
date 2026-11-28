@@ -298,9 +298,9 @@ if ($currentStatus === 'abnormal') {
 
     private function updateLastAlert($sensor, $value, $status) {
         $stmt = $this->conn->prepare("
-            INSERT INTO last_alerts (user_id, sensor_type, last_value, last_status, last_notified_at)
+            INSERT INTO last_alerts (user_id, sensor_type, `last_value`, last_status, last_notified_at)
             VALUES (?, ?, ?, ?, NOW())
-            ON DUPLICATE KEY UPDATE last_value = ?, last_status = ?, last_notified_at = NOW()
+            ON DUPLICATE KEY UPDATE `last_value` = ?, last_status = ?, last_notified_at = NOW()
         ");
         $stmt->execute([$this->user['id'], $sensor, $value, $status, $value, $status]);
     }

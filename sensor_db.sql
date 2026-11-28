@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS alert_logs (
 CREATE TABLE IF NOT EXISTS last_alerts (
     user_id INT NOT NULL,
     sensor_type VARCHAR(20) NOT NULL,
-    last_value FLOAT,
+    `last_value` FLOAT,
     last_status ENUM('normal', 'abnormal') DEFAULT 'normal',
     last_notified_at DATETIME,
     PRIMARY KEY (user_id, sensor_type),
