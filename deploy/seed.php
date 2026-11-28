@@ -6,7 +6,7 @@
 // logikanya dipindah ke kode PHP (lihat deploy/legacy.php / file app terkait).
 
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
-require __DIR__ . '/db_compat.php';
+require_once __DIR__ . '/db_compat.php';
 mysqli_report(MYSQLI_REPORT_OFF);
 
 $db = getenv('DEMO_DB_NAME');
