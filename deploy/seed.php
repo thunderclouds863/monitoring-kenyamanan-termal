@@ -22,6 +22,7 @@ if ($conn->connect_errno) {
     fwrite(STDERR, "Koneksi DB gagal: {$conn->connect_error}\n");
     exit(1);
 }
+$conn->set_charset('utf8mb4');
 $esc = $conn->real_escape_string($db);
 
 function seeded(mysqli $conn, string $esc): bool
@@ -41,7 +42,9 @@ if (seeded($conn, $esc)) {
 }
 
 $isTidb = stripos((string) $conn->query('SELECT VERSION()')->fetch_row()[0], 'tidb') !== false;
-$conn->query("CREATE DATABASE IF NOT EXISTS `$db`");
+// Belum ada penanda seed = database kosong atau sisa import yang gagal: mulai ulang dari bersih
+$conn->query("DROP DATABASE IF EXISTS `$db`");
+$conn->query("CREATE DATABASE `$db`");
 $conn->select_db($db);
 
 foreach ($files as $f) {
