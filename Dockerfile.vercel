@@ -14,5 +14,5 @@ RUN if [ -f composer.json ] && [ ! -f vendor/composer/autoload_real.php ]; then 
  && mkdir -p vendor/PHPMailer-master \
  && ln -sfn ../phpmailer/phpmailer/src vendor/PHPMailer-master/src \
  && chown -R www-data:www-data /var/www/html
-RUN printf '<Directory "/var/www/html/deploy">\n  Require all denied\n</Directory>\nCGIPassAuth On\n' > /etc/apache2/conf-enabled/zz-deny-deploy.conf
+RUN printf '<Directory "/var/www/html/deploy">\n  Require all denied\n</Directory>\n' > /etc/apache2/conf-enabled/zz-deny-deploy.conf
 CMD ["bash", "deploy/start-vercel.sh"]
