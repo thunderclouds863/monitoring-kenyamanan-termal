@@ -138,3 +138,149 @@ class DemoDbSessionHandler implements SessionHandlerInterface
 if (demo_db_external() && PHP_SAPI !== 'cli') {
     session_set_save_handler(new DemoDbSessionHandler(), true);
 }
+/** Cek apakah nilai path sudah berupa URL absolut (mis. Vercel Blob). */
+function demo_is_url(?string $value): bool
+{
+    return is_string($value) && preg_match('#^https?://#i', trim($value)) === 1;
+}
+
+/** Upload file ke Vercel Blob bila BLOB_READ_WRITE_TOKEN tersedia; return URL publik atau null. */
+function demo_blob_upload(string $tmpFile, string $pathname, string $contentType = ''): ?string
+{
+    $token = (string) getenv('BLOB_READ_WRITE_TOKEN');
+    if ($token === '' || !is_file($tmpFile)) {
+        return null;
+    }
+    if ($contentType === '' && class_exists('finfo')) {
+        $fi = new finfo(FILEINFO_MIME_TYPE);
+        $detected = $fi->file($tmpFile);
+        if (is_string($detected) && $detected !== '') {
+            $contentType = $detected;
+        }
+    }
+    if ($contentType === '') {
+        $contentType = 'application/octet-stream';
+    }
+    $body = @file_get_contents($tmpFile);
+    if ($body === false) {
+        return null;
+    }
+    $cleanPath = ltrim(str_replace('\\', '/', $pathname), '/');
+    $encoded = implode('/', array_map('rawurlencode', explode('/', $cleanPath)));
+    $url = 'https://blob.vercel-storage.com/' . $encoded;
+    $headers = [
+        'Authorization: Bearer ' . $token,
+        'x-api-version: 7',
+        'x-add-random-suffix: 1',
+        'x-access: public',
+        'x-content-type: ' . $contentType,
+        'Content-Type: ' . $contentType,
+    ];
+
+    $respBody = null;
+    $status = 0;
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_CUSTOMREQUEST  => 'PUT',
+            CURLOPT_POSTFIELDS     => $body,
+            CURLOPT_HTTPHEADER     => $headers,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 30,
+        ]);
+        $res = curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if (is_string($res)) $respBody = $res;
+    } else {
+        $ctx = stream_context_create([
+            'http' => [
+                'method'        => 'PUT',
+                'header'        => implode("\r\n", $headers) . "\r\n",
+                'content'       => $body,
+                'timeout'       => 30,
+                'ignore_errors' => true,
+            ],
+        ]);
+        $res = @file_get_contents($url, false, $ctx);
+        if (is_string($res)) $respBody = $res;
+        if (!empty($http_response_header[0]) && preg_match('/\s(\d{3})\s/', $http_response_header[0], $m)) {
+            $status = (int) $m[1];
+        }
+    }
+
+    if ($status >= 200 && $status < 300 && $respBody !== null) {
+        $json = json_decode($respBody, true);
+        if (is_array($json) && !empty($json['url'])) {
+            return (string) $json['url'];
+        }
+    }
+    error_log("demo_blob_upload failed (HTTP $status) for $cleanPath");
+    return null;
+}
+
+/** Simpan file upload: ke Vercel Blob (permanen) bila token tersedia, atau fallback lokal. */
+function demo_upload_store(string $tmpFile, string $localTarget, string $blobPathname, string $localReturnPath, string $contentType = ''): ?string
+{
+    $blobUrl = demo_blob_upload($tmpFile, $blobPathname, $contentType);
+    if ($blobUrl !== null) {
+        return $blobUrl;
+    }
+    $dir = dirname($localTarget);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0755, true);
+    }
+    if (is_uploaded_file($tmpFile) ? @move_uploaded_file($tmpFile, $localTarget) : @rename($tmpFile, $localTarget)) {
+        return $localReturnPath;
+    }
+    return null;
+}
+
+/** Endpoint internal reset data demo terjadwal: POST /?__demo_reset=1 dengan secret. */
+function demo_handle_reset_request(): void
+{
+    if (PHP_SAPI === 'cli' || ($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST' || !isset($_GET['__demo_reset'])) {
+        return;
+    }
+    header('Content-Type: application/json; charset=utf-8');
+    $expected = (string) getenv('DEMO_RESET_SECRET');
+    if ($expected === '') {
+        http_response_code(503);
+        echo json_encode(['ok' => false, 'error' => 'DEMO_RESET_SECRET not configured']);
+        exit;
+    }
+    $provided = (string) ($_SERVER['HTTP_X_DEMO_RESET_SECRET'] ?? '');
+    if ($provided === '') {
+        $auth = (string) ($_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '');
+        if (stripos($auth, 'Bearer ') === 0) {
+            $provided = trim(substr($auth, 7));
+        }
+    }
+    if ($provided === '' || !hash_equals($expected, $provided)) {
+        http_response_code(401);
+        echo json_encode(['ok' => false, 'error' => 'Unauthorized']);
+        exit;
+    }
+
+    $envFile = '/var/www/html/deploy/demo.env';
+    if (!is_file($envFile)) {
+        http_response_code(500);
+        echo json_encode(['ok' => false, 'error' => 'deploy/demo.env not found']);
+        exit;
+    }
+    $cmd = 'bash -lc ' . escapeshellarg('set -euo pipefail; source /var/www/html/deploy/demo.env; export DEMO_DB_NAME="$DB_NAME" SQL_FILES; php /var/www/html/deploy/seed.php --force');
+    $out = [];
+    $code = 0;
+    exec($cmd . ' 2>&1', $out, $code);
+    if ($code !== 0) {
+        http_response_code(500);
+        echo json_encode(['ok' => false, 'code' => $code, 'output' => implode("\n", array_slice($out, -15))]);
+        exit;
+    }
+    echo json_encode(['ok' => true, 'reset_at' => gmdate('c'), 'output' => implode("\n", $out)]);
+    exit;
+}
+
+if (PHP_SAPI !== 'cli') {
+    demo_handle_reset_request();
+}

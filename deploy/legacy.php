@@ -29,7 +29,7 @@ if (function_exists('demo_db_external') && demo_db_external()
         . 'background:#fffbe6;border:1px solid #f0c36d;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.18);'
         . 'padding:12px 14px;font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#222;text-align:left">'
         . '<button onclick="this.parentNode.remove()" style="float:right;border:0;background:none;font-size:16px;cursor:pointer;color:#888" aria-label="Tutup">&times;</button>'
-        . '<strong>Akun Demo</strong><span style="color:#777"> · data contoh, reset otomatis</span>'
+        . '<strong>Akun Demo</strong><span style="color:#777"> · data contoh, reset otomatis tiap minggu</span>'
         . '<table style="margin-top:6px;border-collapse:collapse;width:100%;font-size:12px">'
         . '<tr style="color:#777"><td>Role</td><td>User</td><td>Password</td></tr>' . $rows . '</table>' . $note . '</div>';
 

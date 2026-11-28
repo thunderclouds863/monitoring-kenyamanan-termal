@@ -31,12 +31,14 @@ function seeded(mysqli $conn, string $esc): bool
     return $r && $r->num_rows > 0;
 }
 
-if (seeded($conn, $esc)) {
+$force = in_array('--force', $argv ?? [], true);
+if (!$force && seeded($conn, $esc)) {
     echo "Seed: database $db sudah siap\n";
     exit(0);
 }
 $conn->query("SELECT GET_LOCK('seed_$esc', 120)");
-if (seeded($conn, $esc)) {
+if (!$force && seeded($conn, $esc)) {
+    $conn->query("SELECT RELEASE_LOCK('seed_$esc')");
     echo "Seed: database $db sudah disiapkan instance lain\n";
     exit(0);
 }

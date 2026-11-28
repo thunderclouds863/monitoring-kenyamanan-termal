@@ -82,6 +82,9 @@ function resolve_profile_pic(?string $profile_pic): ?string {
     if (empty($profile_pic)) {
         return null;
     }
+    if (preg_match('#^https?://#i', $profile_pic)) {
+        return $profile_pic;
+    }
     // Check if it's a relative uploads path
     if (str_starts_with($profile_pic, 'uploads/')) {
         $fullPath = dirname(__DIR__) . '/' . $profile_pic;

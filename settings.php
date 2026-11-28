@@ -82,8 +82,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['form_type'] ?? '') === 'pr
                     if (!is_dir($uploadDir)) {
                         mkdir($uploadDir, 0755, true);
                     }
-                    if (move_uploaded_file($file['tmp_name'], $uploadDir . $newName)) {
-                        $profile_pic = 'uploads/' . $newName;
+                    $storedPic = function_exists('demo_upload_store')
+                        ? demo_upload_store($file['tmp_name'], $uploadDir . $newName, 'thermal/avatars/' . $newName, 'uploads/' . $newName, $mime)
+                        : (move_uploaded_file($file['tmp_name'], $uploadDir . $newName) ? ('uploads/' . $newName) : null);
+                    if ($storedPic !== null) {
+                        $profile_pic = $storedPic;
                     } else {
                         $error_message = "Gagal menyimpan foto profil.";
                     }
